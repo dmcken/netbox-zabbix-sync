@@ -2,6 +2,7 @@
 """Netbox to Zabbix sync script."""
 
 from os import environ, path
+import functools
 import logging
 import argparse
 from pynetbox import api
@@ -49,6 +50,7 @@ def main(arguments):
     zabbix_host = environ.get("ZABBIX_HOST")
     zabbix_user = environ.get("ZABBIX_USER")
     zabbix_pass = environ.get("ZABBIX_PASS")
+    zabbix_hg_spec = environ.get("ZABBIX_HG_SPEC", None)
     netbox_host = environ.get("NETBOX_HOST")
     netbox_token = environ.get("NETBOX_TOKEN")
 
@@ -71,7 +73,7 @@ def main(arguments):
     for nb_device in netbox_devices:
         try:
             device = NetworkDevice(nb_device, zabbix, netbox_journals,
-                                   arguments.journal)
+                                   arguments.journal, hg_spec=zabbix_hg_spec)
             # Checks if device is part of cluster.
             # Requires the cluster argument.
             if(device.isCluster() and arguments.cluster):
@@ -163,6 +165,16 @@ class InterfaceConfigError(SyncError):
 class ProxyConfigError(SyncError):
     pass
 
+def rgetattr(obj, path, default=None):
+    '''
+    Recursive getattr implementation
+    '''
+    try:
+        return functools.reduce(getattr, path.split('.'), obj)
+    except AttributeError:
+        if default:
+            return default
+        raise
 
 class NetworkDevice():
 
@@ -171,7 +183,7 @@ class NetworkDevice():
     INPUT: (Netbox device class, ZabbixAPI class, journal flag, NB journal class)
     """
 
-    def __init__(self, nb, zabbix, nb_journal_class, journal=None):
+    def __init__(self, nb, zabbix, nb_journal_class, journal=None, hg_spec = None):
         self.nb = nb
         self.id = nb.id
         self.name = nb.name
@@ -181,9 +193,7 @@ class NetworkDevice():
         self.hostgroup = None
         self.zbxproxy = "0"
         self.zabbix_state = 0
-        self.hg_format = [self.nb.site.name,
-                          self.nb.device_type.manufacturer.name,
-                          self.nb.device_role.name]
+        self.hg_format = self._set_hg_format(hg_spec)
         self.journal = journal
         self.nb_journals = nb_journal_class
         self._setBasics()
@@ -219,6 +229,49 @@ class NetworkDevice():
             e = f"Custom field {template_cf} not found for {self.name}."
             logger.warning(e)
             raise SyncInventoryError(e)
+
+    def _set_hg_format(self, hg_spec):
+        '''
+        If a host group spec
+        '''
+
+        hg_map = {
+            'cluster':       'cluster.name',
+            #'cluster_group': 'cluster.name',
+            'device_type':   'device_type.model',
+            'location':      'location.name',
+            'manufacturer':  'device_type.manufacturer.name',
+            'platform':      'platform.name',
+            'rack':          'rack.name',
+            'role':          'device_role.name',
+            'site':          'site.name',
+            #'site_group':    'site.name',
+            'tenant':        'tenant.name',
+            #'tenant_group':  'site.name',
+        }
+
+        # Default if no custom spec is provided.
+        final_spec = [
+            self.nb.site.name,
+            self.nb.device_type.manufacturer.name,
+            self.nb.device_role.name
+        ]
+
+        if hg_spec:
+            parts = hg_spec.split('/')
+            final_spec = []
+            for curr_part in parts:
+                if curr_part in hg_map:
+                    val = rgetattr(self.nb, curr_part)
+                    if val == None:
+                        logger.error("Value of '{0}' is not set on host '{1}'".\
+                            format(curr_part, self.name))
+                        val = 'Unknown'
+                    final_spec.append(str(val))
+                else:
+                    logger.error("Unknown field specifier: {0}".format(curr_part))
+            
+        return final_spec
 
     def setHostgroup(self):
         """Sets hostgroup to a string with hg_format parameters."""
