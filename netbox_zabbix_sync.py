@@ -235,6 +235,7 @@ class NetworkDevice():
         If a host group spec
         '''
 
+        # Map from the host group spec to the location on the netbox object
         hg_map = {
             'cluster':       'cluster.name',
             #'cluster_group': 'cluster.name',
