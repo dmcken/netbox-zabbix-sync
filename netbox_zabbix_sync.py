@@ -232,13 +232,15 @@ class NetworkDevice():
 
     def _set_hg_format(self, hg_spec):
         '''
-        If a host group spec
+        Set the host group string from the host group format string.
+
+        hg_spec - a string in the format of 
         '''
 
         # Map from the host group spec to the location on the netbox object
         hg_map = {
             'cluster':       'cluster.name',
-            #'cluster_group': 'cluster.name',
+            # 'cluster_group': 'cluster.name',
             'device_type':   'device_type.model',
             'location':      'location.name',
             'manufacturer':  'device_type.manufacturer.name',
@@ -246,9 +248,9 @@ class NetworkDevice():
             'rack':          'rack.name',
             'role':          'device_role.name',
             'site':          'site.name',
-            #'site_group':    'site.name',
+            # 'site_group':    'site.name',
             'tenant':        'tenant.name',
-            #'tenant_group':  'site.name',
+            # 'tenant_group':  'site.name',
         }
 
         # Default if no custom spec is provided.
@@ -258,10 +260,11 @@ class NetworkDevice():
             self.nb.device_role.name
         ]
 
+        # If the host group specification string is set then we need
+        # to reset the final_spec and set based on the format string.
         if hg_spec:
-            parts = hg_spec.split('/')
             final_spec = []
-            for curr_part in parts:
+            for curr_part in hg_spec.split('/'):
                 try:
                     val = rgetattr(self.nb, hg_map[curr_part])
                     if val == None:
@@ -273,6 +276,7 @@ class NetworkDevice():
                 except KeyError:
                     logger.error("Unknown field specifier: {0}".format(curr_part))
                     val = 'Unknown-Field'
+                
                 final_spec.append(str(val))
 
         return final_spec
