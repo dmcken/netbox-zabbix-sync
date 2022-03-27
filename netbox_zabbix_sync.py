@@ -262,16 +262,19 @@ class NetworkDevice():
             parts = hg_spec.split('/')
             final_spec = []
             for curr_part in parts:
-                if curr_part in hg_map:
-                    val = rgetattr(self.nb, curr_part)
+                try:
+                    val = rgetattr(self.nb, hg_map[curr_part])
                     if val == None:
-                        logger.error("Value of '{0}' is not set on host '{1}'".\
-                            format(curr_part, self.name))
-                        val = 'Unknown'
-                    final_spec.append(str(val))
-                else:
+                        raise AttributeError()
+                except AttributeError:
+                    logger.error("Field '{0}' is not set on host '{1}'".\
+                        format(curr_part, self.name))
+                    val = 'Unknown'
+                except KeyError:
                     logger.error("Unknown field specifier: {0}".format(curr_part))
-            
+                    val = 'Unknown-Field'
+                final_spec.append(str(val))
+
         return final_spec
 
     def setHostgroup(self):
