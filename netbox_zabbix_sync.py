@@ -11,11 +11,12 @@ import argparse
 import logging
 import os
 
-#from os import environ, path
-
 # External imports
+import dotenv
 import pynetbox
 import pyzabbix
+
+
 
 # Setup logging
 log_format = logging.Formatter('%(asctime)s - %(name)s - '
@@ -69,6 +70,8 @@ def main(arguments):
     # set environment variables
     if arguments.verbose:
         logger.setLevel(logging.DEBUG)
+
+    dotenv.load_dotenv()
 
     config = fetch_sync_config()
 
