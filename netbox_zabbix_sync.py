@@ -1,21 +1,31 @@
 #!/usr/bin/python3
-"""Netbox to Zabbix sync script."""
+"""
+Sync Netbox devices to Zabbix for monitoring.
 
-from os import environ, path
-import logging
+
+
+"""
+
+# System imports
 import argparse
-from pynetbox import api
-from pyzabbix import ZabbixAPI, ZabbixAPIException
+import logging
+import os
 
-# Set logging
+#from os import environ, path
+
+# External imports
+import pynetbox
+import pyzabbix
+
+# Setup logging
 log_format = logging.Formatter('%(asctime)s - %(name)s - '
                                '%(levelname)s - %(message)s')
 lgout = logging.StreamHandler()
 lgout.setFormatter(log_format)
 lgout.setLevel(logging.DEBUG)
 
-lgfile = logging.FileHandler(path.join(path.dirname(
-                             path.realpath(__file__)), "sync.log"))
+lgfile = logging.FileHandler(os.path.join(os.path.dirname(
+                             os.path.realpath(__file__)), "sync.log"))
 lgfile.setFormatter(log_format)
 lgfile.setLevel(logging.DEBUG)
 
@@ -32,74 +42,98 @@ device_cf = "zabbix_hostid"
 zabbix_device_removal = ["Decommissioning", "Inventory"]
 zabbix_device_disable = ["Offline", "Planned", "Staged", "Failed"]
 
+def fetch_sync_config():
+    '''
+    Fetches config parameters for the netbox to zabbix sync.
+    '''
+    config = {}
+    env_vars = [
+        "ZABBIX_HOST",
+        "ZABBIX_USER",
+        "ZABBIX_PASS",
+        "NETBOX_HOST",
+        "NETBOX_TOKEN",
+    ]
+    for var in env_vars:
+        if var not in os.environ:
+            exc_mgs = f"Environment variable {var} has not been defined."
+            logger.error(exc_mgs)
+            raise EnvironmentVarError(exc_mgs)
+
+        config[var] = os.environ.get(var)
+
+    return config
 
 def main(arguments):
     """Run the sync process."""
     # set environment variables
-    if(arguments.verbose):
+    if arguments.verbose:
         logger.setLevel(logging.DEBUG)
-    env_vars = ["ZABBIX_HOST", "ZABBIX_USER", "ZABBIX_PASS",
-                "NETBOX_HOST", "NETBOX_TOKEN"]
-    for var in env_vars:
-        if var not in environ:
-            e = f"Environment variable {var} has not been defined."
-            logger.error(e)
-            raise EnvironmentVarError(e)
-    # Get all virtual environment variables
-    zabbix_host = environ.get("ZABBIX_HOST")
-    zabbix_user = environ.get("ZABBIX_USER")
-    zabbix_pass = environ.get("ZABBIX_PASS")
-    netbox_host = environ.get("NETBOX_HOST")
-    netbox_token = environ.get("NETBOX_TOKEN")
 
-    # Set Zabbix API
+    config = fetch_sync_config()
+
+    # Setup Zabbix API and fetch data
     try:
-        zabbix = ZabbixAPI(zabbix_host)
-        zabbix.login(zabbix_user, zabbix_pass)
-    except ZabbixAPIException as e:
-        e = f"Zabbix returned the following error: {str(e)}."
-        logger.error(e)
-    # Set Netbox API
-    netbox = api(netbox_host, token=netbox_token, threading=True)
-    # Get all Zabbix and Netbox data
-    netbox_devices = netbox.dcim.devices.all()
-    netbox_journals = netbox.extras.journal_entries
-    zabbix_groups = zabbix.hostgroup.get(output=['name'])
+        zabbix = pyzabbix.ZabbixAPI(config["ZABBIX_HOST"])
+        zabbix.login(config["ZABBIX_USER"], config["ZABBIX_PASS"])
+    except pyzabbix.ZabbixAPIException as exc:
+        exc_msg = f"Zabbix returned the following error: {str(exc)}."
+        logger.error(exc_msg)
+
+    zabbix_groups    = zabbix.hostgroup.get(output=['name'])
     zabbix_templates = zabbix.template.get(output=['name'])
-    zabbix_proxys = zabbix.proxy.get(output=['host'])
+    zabbix_proxys    = zabbix.proxy.get(output=['host'])
+
+    # Set Netbox API and fetch data
+    netbox = pynetbox.api(
+        config["NETBOX_HOST"],
+        token=config["NETBOX_TOKEN"],
+        threading=True
+    )
+
+    netbox_devices  = netbox.dcim.devices.all()
+    netbox_journals = netbox.extras.journal_entries
+
     # Go through all Netbox devices
     for nb_device in netbox_devices:
         try:
-            device = NetworkDevice(nb_device, zabbix, netbox_journals,
-                                   arguments.journal)
+            device = NetworkDevice(
+                nb_device,
+                zabbix,
+                netbox_journals,
+                arguments.journal
+            )
             # Checks if device is part of cluster.
             # Requires the cluster argument.
-            if(device.isCluster() and arguments.cluster):
+            if device.isCluster() and arguments.cluster:
                 # Check if device is master or slave
-                if(device.promoteMasterDevice()):
-                    e = (f"Device {device.name} is "
-                         f"part of cluster and primary.")
+                if device.promoteMasterDevice():
+                    e = f"Device {device.name} is part of cluster and primary."
                     logger.info(e)
                 else:
                     # Device is secondary in cluster.
                     # Don't continue with this device.
-                    e = (f"Device {device.name} is part of cluster "
-                         f"but not primary. Skipping this host...")
+                    e = f"Device {device.name} is part of cluster " \
+                        f"but not primary. Skipping this host..."
                     logger.info(e)
                     continue
             # With -t flag: add Tenant name to hostgroup name.
-            if(arguments.tenant):
-                if(device.tenant):
+            if arguments.tenant:
+                if device.tenant:
                     device.hg_format.insert(1, device.tenant.name)
                     device.setHostgroup()
-                    logger.debug(f"Added Tenant {device.tenant.name} to "
-                                 f"hostgroup format of {device.name}.")
+                    logger.debug(
+                        f"Added Tenant {device.tenant.name} to " \
+                        f"hostgroup format of {device.name}."
+                    )
                 else:
-                    logger.debug(f"{device.name} is not linked to a tenant. "
-                                 f"Using HG format '{device.hostgroup}'.")
+                    logger.debug(
+                        f"{device.name} is not linked to a tenant. "
+                        f"Using HG format '{device.hostgroup}'."
+                    )
             # Checks if device is in cleanup state
-            if(device.status in zabbix_device_removal):
-                if(device.zabbix_id):
+            if device.status in zabbix_device_removal:
+                if device.zabbix_id :
                     # Delete device from Zabbix
                     # and remove hostID from Netbox.
                     device.cleanup()
@@ -108,30 +142,40 @@ def main(arguments):
                 else:
                     # Device has been added to Netbox
                     # but is not in Activate state
-                    logger.info(f"Skipping host {device.name} since its "
-                                f"not in the active state.")
+                    logger.info(
+                        f"Skipping host {device.name} since its "
+                        f"not in the active state."
+                    )
                 continue
-            elif(device.status in zabbix_device_disable):
+            elif device.status in zabbix_device_disable:
                 device.zabbix_state = 1
+
             # Add hostgroup is flag is true
             # and Hostgroup is not present in Zabbix
-            if(arguments.hostgroups):
+            if arguments.hostgroups:
                 for group in zabbix_groups:
                     # If hostgroup is already present in Zabbix
-                    if(group["name"] == device.hostgroup):
+                    if group["name"] == device.hostgroup:
                         break
                 else:
                     # Create new hostgroup
                     hostgroup = device.createZabbixHostgroup()
                     zabbix_groups.append(hostgroup)
             # Device is already present in Zabbix
-            if(device.zabbix_id):
-                device.ConsistencyCheck(zabbix_groups, zabbix_templates,
-                                        zabbix_proxys, arguments.proxy_power)
+            if device.zabbix_id:
+                device.ConsistencyCheck(
+                    zabbix_groups,
+                    zabbix_templates,
+                    zabbix_proxys,
+                    arguments.proxy_power
+                )
             # Add device to Zabbix
             else:
-                device.createInZabbix(zabbix_groups, zabbix_templates,
-                                      zabbix_proxys)
+                device.createInZabbix(
+                    zabbix_groups,
+                    zabbix_templates,
+                    zabbix_proxys
+                )
         except SyncError:
             pass
 
@@ -194,7 +238,7 @@ class NetworkDevice():
         Sets basic information like IP address.
         """
         # Return error if device does not have primary IP.
-        if(self.nb.primary_ip):
+        if self.nb.primary_ip:
             self.cidr = self.nb.primary_ip.address
             self.ip = self.cidr.split("/")[0]
         else:
@@ -295,7 +339,7 @@ class NetworkDevice():
         """
         # Go through all groups
         for group in groups:
-            if(group['name'] == self.hostgroup):
+            if group['name'] == self.hostgroup:
                 self.group_id = group['groupid']
                 e = (f"Found group {group['name']} for host {self.name}.")
                 logger.debug(e)
@@ -319,7 +363,7 @@ class NetworkDevice():
                 e = f"Deleted host {self.name} from Zabbix."
                 logger.info(e)
                 self.create_journal_entry("warning", "Deleted host from Zabbix")
-            except ZabbixAPIException as e:
+            except pyzabbix.ZabbixAPIException as e:
                 e = f"Zabbix returned the following error: {str(e)}."
                 logger.error(e)
                 raise SyncExternalError(e)
@@ -400,7 +444,7 @@ class NetworkDevice():
                                                proxy_hostid=self.zbxproxy,
                                                description=description)
                 self.zabbix_id = host["hostids"][0]
-            except ZabbixAPIException as e:
+            except pyzabbix.ZabbixAPIException as e:
                 e = f"Couldn't add {self.name}, Zabbix returned {str(e)}."
                 logger.error(e)
                 raise SyncExternalError(e)
@@ -424,7 +468,7 @@ class NetworkDevice():
             logger.info(e)
             data = {'groupid': groupid["groupids"][0], 'name': self.hostgroup}
             return data
-        except ZabbixAPIException as e:
+        except pyzabbix.ZabbixAPIException as e:
             e = f"Couldn't add hostgroup, Zabbix returned {str(e)}."
             logger.error(e)
             raise SyncExternalError(e)
@@ -436,7 +480,7 @@ class NetworkDevice():
         """
         try:
             self.zabbix.host.update(hostid=self.zabbix_id, **kwargs)
-        except ZabbixAPIException as e:
+        except pyzabbix.ZabbixAPIException as e:
             e = f"Zabbix returned the following error: {str(e)}."
             logger.error(e)
             raise SyncExternalError(e)
@@ -456,12 +500,12 @@ class NetworkDevice():
                                                       'interfaceid'],
                                     selectGroups=["id"],
                                     selectParentTemplates=["id"])
-        if(len(host) > 1):
+        if len(host) > 1:
             e = (f"Got {len(host)} results for Zabbix hosts "
                  f"with ID {self.zabbix_id} - hostname {self.name}.")
             logger.error(e)
             raise SyncInventoryError(e)
-        elif(len(host) == 0):
+        elif len(host) == 0:
             e = (f"No Zabbix host found for {self.name}. "
                  f"This is likely the result of a deleted Zabbix host "
                  f"without zeroing the ID field in Netbox.")
@@ -554,7 +598,7 @@ class NetworkDevice():
                     # Set update if values don't match
                     if(host["interfaces"][0][key] != str(item)):
                         updates[key] = item
-            if(updates):
+            if updates:
                 # If interface updates have been found: push to Zabbix
                 logger.warning(f"Device {self.name}: Interface OUT of sync.")
                 if("type" in updates):
@@ -571,7 +615,7 @@ class NetworkDevice():
                     e = f"Solved {self.name} interface conflict."
                     logger.info(e)
                     self.create_journal_entry("info", e)
-                except ZabbixAPIException as e:
+                except pyzabbix.ZabbixAPIException as e:
                     e = f"Zabbix returned the following error: {str(e)}."
                     logger.error(e)
                     raise SyncExternalError(e)
@@ -587,9 +631,11 @@ class NetworkDevice():
             SyncInventoryError(e)
 
     def create_journal_entry(self, severity, message):
-        # Send a new Journal entry to Netbox. Usefull for viewing actions
-        # in Netbox without having to look in Zabbix or the script log output
-        if(self.journal):
+        '''
+        Send a new Journal entry to Netbox. Usefull for viewing actions
+        in Netbox without having to look in Zabbix or the script log output
+        '''
+        if self.journal:
             # Check if the severity is valid
             if severity not in ["info", "success", "warning", "danger"]:
                 logger.warning(f"Value {severity} not valid for NB journal entries.")
