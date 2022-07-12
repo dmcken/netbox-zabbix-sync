@@ -79,19 +79,40 @@ def fetch_sync_config():
         "ZABBIX_HOST",
         "ZABBIX_USER",
         "ZABBIX_PASS",
+        "ZABBIX_TOKEN",
         "NETBOX_HOST",
         "NETBOX_TOKEN",
     ]
     for var in env_vars:
-        if var not in os.environ:
-            exc_mgs = f"Environment variable {var} has not been defined."
-            logger.error(exc_mgs)
-            raise EnvironmentVarError(exc_mgs)
-
-        config[var] = os.environ.get(var)
+        config[var] = os.environ.get(var, None)
 
     return config
 
+def connect_zabbix(config):
+    '''
+    Connect to zabbix API
+
+    Use token if present or username and password if not.
+
+    Fails if neither are present
+    '''
+    try:
+        connect_params = {}
+        if config['ZABBIX_TOKEN']:
+            connect_params['api_token'] = config['ZABBIX_TOKEN']
+        elif config['ZABBIX_USER'] and config['ZABBIX_PASS']:
+            connect_params['user']     = config['ZABBIX_USER']
+            connect_params['password'] = config['ZABBIX_PASS']
+        else:
+            raise EnvironmentVarError("ZABBIX_TOKEN or the combination of "
+                "ZABBIX_USER and ZABBIX_PASS must be defined")
+
+        zabbix = pyzabbix.ZabbixAPI(config["ZABBIX_HOST"])
+        zabbix.login(**connect_params)
+    except pyzabbix.ZabbixAPIException as exc:
+        exc_msg = f"Zabbix returned the following error: {str(exc)}."
+        logger.error(exc_msg)
+    
 def main(arguments):
     """Run the sync process."""
     # set environment variables
@@ -101,17 +122,7 @@ def main(arguments):
 
     config = fetch_sync_config()
 
-    # Setup Zabbix API and fetch data
-    try:
-        zabbix = pyzabbix.ZabbixAPI(config["ZABBIX_HOST"])
-        zabbix.login(config["ZABBIX_USER"], config["ZABBIX_PASS"])
-    except pyzabbix.ZabbixAPIException as exc:
-        exc_msg = f"Zabbix returned the following error: {str(exc)}."
-        logger.error(exc_msg)
-
-    zabbix_groups    = zabbix.hostgroup.get(output=['name'])
-    zabbix_templates = zabbix.template.get(output=['name'])
-    zabbix_proxys    = zabbix.proxy.get(output=['host'])
+    zabbix = connect_zabbix(config)
 
     # Set Netbox API and fetch data
     netbox = pynetbox.api(
@@ -120,6 +131,12 @@ def main(arguments):
         threading = True,
     )
 
+    # Fetch zabbix data
+    zabbix_groups    = zabbix.hostgroup.get(output=['name'])
+    zabbix_templates = zabbix.template.get(output=['name'])
+    zabbix_proxys    = zabbix.proxy.get(output=['host'])
+
+    # Fetch netbox data
     netbox_devices  = netbox.dcim.devices.all()
     netbox_journals = netbox.extras.journal_entries
 
@@ -137,8 +154,7 @@ def main(arguments):
             if device.isCluster() and arguments.cluster:
                 # Check if device is master or slave
                 if device.promoteMasterDevice():
-                    e = f"Device {device.name} is part of cluster and primary."
-                    logger.info(e)
+                    logger.info(f"Device {device.name} is part of cluster and primary.")
                 else:
                     # Device is secondary in cluster.
                     # Don't continue with this device.
@@ -177,6 +193,9 @@ def main(arguments):
                     # Create new hostgroup
                     hostgroup = device.createZabbixHostgroup()
                     zabbix_groups.append(hostgroup)
+
+            device.create_zabbix_hostgroups(zabbix_groups)
+
             # Device is already present in Zabbix
             if device.zabbix_id:
                 device.ConsistencyCheck(
@@ -284,6 +303,27 @@ class NetworkDevice():
             if value in [None,'']:
                 continue
             self.hostgroups.append(f"{name} - {value}")
+
+    def create_zabbix_hostgroups(self, zabbix_groups):
+        """
+        Creates Zabbix host group based on hostgroup format.
+        """
+        group_data = []
+        for curr_hostgroup in self.hostgroups:
+            try:
+                # test if the group exists. if 
+                groupid = self.zabbix.hostgroup.create(name=curr_hostgroup)
+                logger.info(f"Added hostgroup '{self.hostgroup}'.")
+                group_data.append({
+                    'groupid': groupid["groupids"][0],
+                    'name': self.hostgroup
+                })
+            except pyzabbix.ZabbixAPIException as exc:
+                exc_msg = f"Couldn't add hostgroup {curr_hostgroup}, Zabbix returned {str(exc)}."
+                logger.error(exc_msg)
+                raise SyncExternalError(exc_msg) from exc
+
+        return group_data
 
     def isCluster(self):
         """
