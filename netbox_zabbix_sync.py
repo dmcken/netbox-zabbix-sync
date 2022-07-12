@@ -16,7 +16,8 @@ import dotenv
 import pynetbox
 import pyzabbix
 
-
+# Local imports
+import utils
 
 # Setup logging
 log_format = logging.Formatter('%(asctime)s - %(name)s - '
@@ -42,6 +43,28 @@ device_cf = "zabbix_hostid"
 # Netbox to Zabbix device state convertion
 zabbix_device_removal = ["Decommissioning", "Inventory"]
 zabbix_device_disable = ["Offline", "Planned", "Staged", "Failed"]
+
+# Exceptions
+class SyncError(Exception):
+    pass
+
+class SyncExternalError(SyncError):
+    pass
+
+class SyncInventoryError(SyncError):
+    pass
+
+class SyncDuplicateError(SyncError):
+    pass
+
+class EnvironmentVarError(SyncError):
+    pass
+
+class InterfaceConfigError(SyncError):
+    pass
+
+class ProxyConfigError(SyncError):
+    pass
 
 def fetch_sync_config():
     '''
@@ -184,59 +207,33 @@ def main(arguments):
         except SyncError:
             pass
 
-
-class SyncError(Exception):
-    pass
-
-
-class SyncExternalError(SyncError):
-    pass
-
-
-class SyncInventoryError(SyncError):
-    pass
-
-
-class SyncDuplicateError(SyncError):
-    pass
-
-
-class EnvironmentVarError(SyncError):
-    pass
-
-
-class InterfaceConfigError(SyncError):
-    pass
-
-
-class ProxyConfigError(SyncError):
-    pass
-
-
 class NetworkDevice():
-
     """
     Represents Network device.
     INPUT: (Netbox device class, ZabbixAPI class, journal flag, NB journal class)
     """
 
-    def __init__(self, nb, zabbix, nb_journal_class, journal=None):
-        self.nb = nb
-        self.id = nb.id
-        self.name = nb.name
-        self.status = nb.status.label
+    def __init__(self, nb_device, zabbix, nb_journal_class, journal=None):
+        self.nb = nb_device
+        self.id = nb_device.id
+        self.name = nb_device.name
+        self.status = nb_device.status.label
         self.zabbix = zabbix
-        self.tenant = nb.tenant
+        self.tenant = nb_device.tenant
         self.hostgroup = None
+        self.hostgroups = []
         self.zbxproxy = "0"
         self.zabbix_state = 0
-        self.hg_format = [self.nb.site.name,
-                          self.nb.device_type.manufacturer.name,
-                          self.nb.device_role.name]
+        self.hg_format = [
+            self.nb.site.name,
+            self.nb.device_type.manufacturer.name,
+            self.nb.device_role.name
+        ]
         self.journal = journal
         self.nb_journals = nb_journal_class
         self._setBasics()
         self.setHostgroup()
+        self.set_host_groups()
 
     def _setBasics(self):
         """
@@ -253,7 +250,7 @@ class NetworkDevice():
 
         # Check if device_type has custom field
         device_type_cf = self.nb.device_type.custom_fields
-        if(template_cf in device_type_cf):
+        if template_cf in device_type_cf:
             self.template_name = device_type_cf[template_cf]
         else:
             e = (f"Custom field {template_cf} not "
@@ -262,7 +259,7 @@ class NetworkDevice():
             raise SyncInventoryError(e)
 
         # Check if device has custom field
-        if(device_cf in self.nb.custom_fields):
+        if device_cf in self.nb.custom_fields:
             self.zabbix_id = self.nb.custom_fields[device_cf]
         else:
             e = f"Custom field {template_cf} not found for {self.name}."
@@ -273,11 +270,32 @@ class NetworkDevice():
         """Sets hostgroup to a string with hg_format parameters."""
         self.hostgroup = "/".join(self.hg_format)
 
+    def set_host_groups(self):
+        '''
+        Sets the various hostgroups desired
+
+        These will be of the format:
+        Location - [Location Name]
+        Rack - [Rack Name]
+        Site - [Site Name]
+        Role - [Device Role]
+        Tenant - [Tenant Name]
+
+        '''
+        groups = {
+            'Location': 'location.name',
+            'Rack': 'rack.name',
+            'Site': 'site.name',
+            'Role': 'device_role.name',
+            'Tenant': 'tenant.name',
+        }
+
+
     def isCluster(self):
         """
         Checks if device is part of cluster.
         """
-        if(self.nb.virtual_chassis):
+        if self.nb.virtual_chassis:
             return True
         else:
             return False
@@ -286,9 +304,8 @@ class NetworkDevice():
         """
         Returns chassis master ID.
         """
-        if(not self.isCluster()):
-            e = (f"Unable to proces {self.name} for cluster calculation: "
-                 f"not part of a cluster.")
+        if not self.isCluster():
+            e = f"Unable to proces {self.name} for cluster calculation: not part of a cluster."
             logger.warning(e)
             raise SyncInventoryError(e)
         else:
@@ -301,7 +318,7 @@ class NetworkDevice():
         Returns True if succesfull, returns False if device is secondary.
         """
         masterid = self.getClusterMaster()
-        if(masterid == self.id):
+        if masterid == self.id:
             logger.debug(f"Device {self.name} is primary cluster member. "
                          f"Modifying hostname from {self.name} to " +
                          f"{self.nb.virtual_chassis.name}.")
@@ -318,13 +335,13 @@ class NetworkDevice():
         INPUT: list of templates
         OUTPUT: True
         """
-        if(not self.template_name):
+        if not self.template_name:
             e = (f"Device template '{self.nb.device_type.display}' "
                  "has no Zabbix template defined.")
             logger.info(e)
             raise SyncInventoryError()
         for template in templates:
-            if(template['name'] == self.template_name):
+            if template['name'] == self.template_name:
                 self.template_id = template['templateid']
                 e = (f"Found template ID {str(template['templateid'])} "
                      f"for host {self.name}.")
@@ -360,7 +377,7 @@ class NetworkDevice():
         Removes device from external resources.
         Resets custom fields in Netbox.
         """
-        if(self.zabbix_id):
+        if self.zabbix_id:
             try:
                 self.zabbix.host.delete(self.zabbix_id)
                 self.nb.custom_fields[device_cf] = None
@@ -378,7 +395,7 @@ class NetworkDevice():
         Checks if hostname exists in Zabbix.
         """
         host = self.zabbix.host.get(filter={'name': self.name}, output=[])
-        if(host):
+        if host:
             return True
         else:
             return False
@@ -393,7 +410,7 @@ class NetworkDevice():
             interface = ZabbixInterface(self.nb.config_context, self.ip)
             # Check if Netbox has device context.
             # If not fall back to old config.
-            if(interface.get_context()):
+            if interface.get_context():
                 # If device is SNMP type, add aditional information.
                 if(interface.interface["type"] == 2):
                     interface.set_snmp()
@@ -428,9 +445,9 @@ class NetworkDevice():
         Creates Zabbix host object with parameters from Netbox object.
         """
         # Check if hostname is already present in Zabbix
-        if(not self._zabbixHostnameExists()):
+        if not self._zabbixHostnameExists():
             # Get group and template ID's for host
-            if(not self.getZabbixGroup(groups)):
+            if not self.getZabbixGroup(groups):
                 raise SyncInventoryError()
             self.getZabbixTemplate(templates)
             # Set interface, group and template configuration
@@ -441,13 +458,15 @@ class NetworkDevice():
             self.setProxy(proxys)
             # Add host to Zabbix
             try:
-                host = self.zabbix.host.create(host=self.name,
-                                               status=self.zabbix_state,
-                                               interfaces=interfaces,
-                                               groups=groups,
-                                               templates=templates,
-                                               proxy_hostid=self.zbxproxy,
-                                               description=description)
+                host = self.zabbix.host.create(
+                    host=self.name,
+                    status=self.zabbix_state,
+                    interfaces=interfaces,
+                    groups=groups,
+                    templates=templates,
+                    proxy_hostid=self.zbxproxy,
+                    description=description,
+                )
                 self.zabbix_id = host["hostids"][0]
             except pyzabbix.ZabbixAPIException as e:
                 e = f"Couldn't add {self.name}, Zabbix returned {str(e)}."
