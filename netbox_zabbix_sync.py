@@ -760,9 +760,11 @@ class ZabbixInterface():
         self.interface = self.skelet
         self.interface["type"] = "2"
         self.interface["port"] = "161"
-        self.interface["details"] = {"version": "2",
-                                     "community": "{$SNMP_COMMUNITY}",
-                                     "bulk": "1"}
+        self.interface["details"] = {
+            "version": "2",
+            "community": "{$SNMP_COMMUNITY}",
+            "bulk": "1"
+        }
 
 
 if __name__ == "__main__":
