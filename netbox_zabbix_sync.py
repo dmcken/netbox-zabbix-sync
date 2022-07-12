@@ -10,6 +10,7 @@ Sync Netbox devices to Zabbix for monitoring.
 import argparse
 import logging
 import os
+import pprint
 
 # External imports
 import dotenv
@@ -235,7 +236,7 @@ class NetworkDevice():
         self.setHostgroup()
         self.set_host_groups()
 
-        logger.info(f"Host groups: {self.hostgroups}")
+        logger.info(f"Host groups: {pprint.pformat(self.hostgroups)}")
 
     def _setBasics(self):
         """
