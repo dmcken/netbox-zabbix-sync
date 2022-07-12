@@ -235,6 +235,8 @@ class NetworkDevice():
         self.setHostgroup()
         self.set_host_groups()
 
+        logger.info(f"Host groups: {self.hostgroups}")
+
     def _setBasics(self):
         """
         Sets basic information like IP address.
@@ -289,7 +291,11 @@ class NetworkDevice():
             'Role': 'device_role.name',
             'Tenant': 'tenant.name',
         }
-
+        for name, loc in groups.items():
+            value = utils.rgetattr(self.nb, loc, None)
+            if value in [None,'']:
+                continue
+            self.hostgroups.append(f"{name} - {value}")
 
     def isCluster(self):
         """
