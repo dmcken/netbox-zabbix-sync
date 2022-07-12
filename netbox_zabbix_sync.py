@@ -46,7 +46,11 @@ zabbix_device_disable = ["Offline", "Planned", "Staged", "Failed"]
 def fetch_sync_config():
     '''
     Fetches config parameters for the netbox to zabbix sync.
+
+    Checks for missing environment variable first
     '''
+    dotenv.load_dotenv()
+
     config = {}
     env_vars = [
         "ZABBIX_HOST",
@@ -71,8 +75,6 @@ def main(arguments):
     if arguments.verbose:
         logger.setLevel(logging.DEBUG)
 
-    dotenv.load_dotenv()
-
     config = fetch_sync_config()
 
     # Setup Zabbix API and fetch data
@@ -89,9 +91,9 @@ def main(arguments):
 
     # Set Netbox API and fetch data
     netbox = pynetbox.api(
-        config["NETBOX_HOST"],
-        token=config["NETBOX_TOKEN"],
-        threading=True
+        url       = config["NETBOX_HOST"],
+        token     = config["NETBOX_TOKEN"],
+        threading = True,
     )
 
     netbox_devices  = netbox.dcim.devices.all()
@@ -570,41 +572,41 @@ class NetworkDevice():
                                  " -p flag was ommited: no "
                                  "changes have been made.")
         # If only 1 interface has been found
-        if(len(host['interfaces']) == 1):
+        if len(host['interfaces']) == 1:
             updates = {}
             # Go through each key / item and check if it matches Zabbix
             for key, item in self.setInterfaceDetails()[0].items():
                 # Check if Netbox value is found in Zabbix
-                if(key in host["interfaces"][0]):
+                if key in host["interfaces"][0]:
                     # If SNMP is used, go through nested dict
                     # to compare SNMP parameters
-                    if(type(item) == dict and key == "details"):
+                    if type(item) == dict and key == "details":
                         for k, i in item.items():
-                            if(k in host["interfaces"][0][key]):
+                            if k in host["interfaces"][0][key]:
                                 # Set update if values don't match
-                                if(host["interfaces"][0][key][k] != str(i)):
+                                if host["interfaces"][0][key][k] != str(i):
                                     # If dict has not been created, add it
-                                    if(key not in updates):
+                                    if key not in updates:
                                         updates[key] = {}
                                     updates[key][k] = str(i)
                                     # If SNMP version has been changed
                                     # break loop and force full SNMP update
-                                    if(k == "version"):
+                                    if k == "version":
                                         break
                         # Force full SNMP config update
                         # when version has changed.
-                        if(key in updates):
-                            if("version" in updates[key]):
+                        if key in updates:
+                            if "version" in updates[key]:
                                 for k, i in item.items():
                                     updates[key][k] = str(i)
                         continue
                     # Set update if values don't match
-                    if(host["interfaces"][0][key] != str(item)):
+                    if host["interfaces"][0][key] != str(item):
                         updates[key] = item
             if updates:
                 # If interface updates have been found: push to Zabbix
                 logger.warning(f"Device {self.name}: Interface OUT of sync.")
-                if("type" in updates):
+                if "type" in updates:
                     # Changing interface type not supported. Raise exception.
                     e = (f"Device {self.name}: changing interface type to "
                          f"{str(updates['type'])} is not supported.")
@@ -668,9 +670,9 @@ class ZabbixInterface():
 
     def get_context(self):
         # check if Netbox custom context has been defined.
-        if("zabbix" in self.context):
+        if "zabbix" in self.context:
             zabbix = self.context["zabbix"]
-            if("interface_type" in zabbix and "interface_port" in zabbix):
+            if "interface_type" in zabbix and "interface_port" in zabbix:
                 self.interface["type"] = zabbix["interface_type"]
                 self.interface["port"] = zabbix["interface_port"]
                 return True
@@ -680,27 +682,29 @@ class ZabbixInterface():
             return False
 
     def set_snmp(self):
-        # Check if interface is type SNMP
-        if(self.interface["type"] == 2):
+        '''
+        Check if interface is type SNMP
+        '''
+        if self.interface["type"] == 2:
             # Checks if SNMP settings are defined in Netbox
-            if("snmp" in self.context["zabbix"]):
+            if "snmp" in self.context["zabbix"]:
                 snmp = self.context["zabbix"]["snmp"]
                 self.interface["details"] = {}
                 # Checks if bulk config has been defined
-                if(snmp.get("bulk")):
+                if snmp.get("bulk"):
                     self.interface["details"]["bulk"] = str(snmp.pop("bulk"))
                 else:
                     # Fallback to bulk enabled if not specified
                     self.interface["details"]["bulk"] = "1"
                 # SNMP Version config is required in Netbox config context
-                if(snmp.get("version")):
+                if snmp.get("version"):
                     self.interface["details"]["version"] = str(snmp.pop("version"))
                 else:
                     e = "SNMP version option is not defined."
                     raise InterfaceConfigError(e)
                 # If version 2 is used, get community string
-                if(self.interface["details"]["version"] == '2'):
-                    if("community" in snmp):
+                if self.interface["details"]["version"] == '2':
+                    if "community" in snmp:
                         community = snmp["community"]
                         self.interface["details"]["community"] = str(community)
                     else:
@@ -709,12 +713,12 @@ class ZabbixInterface():
                         raise InterfaceConfigError(e)
                 # If version 3 has been used, get all
                 # SNMPv3 Netbox related configs
-                elif(self.interface["details"]["version"] == '3'):
+                elif self.interface["details"]["version"] == '3':
                     items = ["securityname", "securitylevel", "authpassphrase",
                              "privpassphrase", "authprotocol", "privprotocol",
                              "contextname"]
                     for key, item in snmp.items():
-                        if(key in items):
+                        if key in items:
                             self.interface["details"][key] = str(item)
                 else:
                     e = "Unsupported SNMP version."
@@ -727,7 +731,7 @@ class ZabbixInterface():
             raise InterfaceConfigError(e)
 
     def set_default(self):
-        # Set default config to SNMPv2,port 161 and community macro.
+        '''Set default config to SNMPv2,port 161 and community macro.'''
         self.interface = self.skelet
         self.interface["type"] = "2"
         self.interface["port"] = "161"
@@ -736,7 +740,7 @@ class ZabbixInterface():
                                      "bulk": "1"}
 
 
-if(__name__ == "__main__"):
+if __name__ == "__main__":
     # Arguments parsing
     parser = argparse.ArgumentParser(
         description='A script to sync Zabbix with Netbox device data.'
