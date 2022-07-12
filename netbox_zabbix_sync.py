@@ -20,8 +20,7 @@ import pyzabbix
 import utils
 
 # Setup logging
-log_format = logging.Formatter('%(asctime)s - %(name)s - '
-                               '%(levelname)s - %(message)s')
+log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 lgout = logging.StreamHandler()
 lgout.setFormatter(log_format)
 lgout.setLevel(logging.DEBUG)
@@ -96,6 +95,7 @@ def main(arguments):
     """Run the sync process."""
     # set environment variables
     if arguments.verbose:
+        logger.warning("Setting log level to debug")
         logger.setLevel(logging.DEBUG)
 
     config = fetch_sync_config()
