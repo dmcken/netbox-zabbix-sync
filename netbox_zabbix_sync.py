@@ -146,20 +146,7 @@ def main(arguments):
                         f"but not primary. Skipping this host..."
                     logger.info(e)
                     continue
-            # With -t flag: add Tenant name to hostgroup name.
-            if arguments.tenant:
-                if device.tenant:
-                    device.hg_format.insert(1, device.tenant.name)
-                    device.setHostgroup()
-                    logger.debug(
-                        f"Added Tenant {device.tenant.name} to " \
-                        f"hostgroup format of {device.name}."
-                    )
-                else:
-                    logger.debug(
-                        f"{device.name} is not linked to a tenant. "
-                        f"Using HG format '{device.hostgroup}'."
-                    )
+
             # Checks if device is in cleanup state
             if device.status in zabbix_device_removal:
                 if device.zabbix_id :
