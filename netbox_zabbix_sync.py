@@ -8,6 +8,7 @@ Sync Netbox devices to Zabbix for monitoring.
 
 # System imports
 import argparse
+from cProfile import label
 import logging
 import os
 import pprint
@@ -198,6 +199,8 @@ def main(arguments):
             if device.zabbix_id:
                 device.ConsistencyCheck(
                     zabbix_groups,
+                    host_group_data,
+                    zabbix_groups_map,
                     zabbix_templates,
                     zabbix_proxys,
                     arguments.proxy_power
@@ -205,6 +208,7 @@ def main(arguments):
             else: # Add device to Zabbix
                 device.createInZabbix(
                     zabbix_groups,
+                    host_group_data,
                     zabbix_templates,
                     zabbix_proxys
                 )
@@ -479,7 +483,7 @@ class NetworkDevice():
                     logger.warning(err_msg)
                     return False
 
-    def createInZabbix(self, groups, templates, proxys,
+    def createInZabbix(self, groups, host_group_data, templates, proxys,
                        description="Host added by Netbox sync script."):
         """
         Creates Zabbix host object with parameters from Netbox object.
@@ -550,7 +554,7 @@ class NetworkDevice():
         logger.info(f"Updated host {self.name} with data {kwargs}.")
         self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
 
-    def ConsistencyCheck(self, groups, templates, proxys, proxy_power):
+    def ConsistencyCheck(self, groups, host_group_data, zabbix_groups_map, templates, proxys, proxy_power):
         """
         Checks if Zabbix object is still valid with Netbox parameters.
         """
@@ -559,9 +563,13 @@ class NetworkDevice():
         self.setProxy(proxys)
         host = self.zabbix.host.get(
             filter={'hostid': self.zabbix_id},
-            selectInterfaces=['type', 'ip',
-                                'port', 'details',
-                                'interfaceid'],
+            selectInterfaces=[
+                'type',
+                'ip',
+                'port',
+                'details',
+                'interfaceid',
+            ],
             selectGroups=["id"],
             selectParentTemplates=["id"]
         )
@@ -600,14 +608,26 @@ class NetworkDevice():
             logger.warning(f"Device {self.name}: template OUT of sync.")
             self.updateZabbixHost(templates=self.template_id)
 
-        for group in host["groups"]:
-            if group["groupid"] == self.group_id:
-                logger.debug(f"Device {self.name}: hostgroup in-sync.")
-                break
-        else:
-            logger.warning(f"Device {self.name}: hostgroup OUT of sync.")
-            self.updateZabbixHost(groups={'groupid': self.group_id})
+        # for group in host["groups"]:
+        #     if group["groupid"] == self.group_id:
+        #         logger.debug(f"Device {self.name}: hostgroup in-sync.")
+        #         break
+        # else:
+        #     logger.warning(f"Device {self.name}: hostgroup OUT of sync.")
+        #     self.updateZabbixHost(groups={'groupid': self.group_id})
 
+        # Sync the host groups
+        n_host_group_ids = []
+        for curr_group in host_group_data:
+            n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
+        n_host_group_ids = sorted(n_host_group_ids)
+        z_host_group_ids = sorted(map(lambda x: int(x['groupid']), host['groups']))
+
+        if z_host_group_ids != n_host_group_ids:
+            group_list = map(lambda x: {'groupid': x}, n_host_group_ids)
+            self.updateZabbixHost(groups=group_list)
+
+        # Update host status
         if int(host["status"]) == self.zabbix_state:
             logger.debug(f"Device {self.name}: status in-sync.")
         else:
