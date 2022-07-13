@@ -198,12 +198,10 @@ def main(arguments):
             # Device is already present in Zabbix
             if device.zabbix_id:
                 device.ConsistencyCheck(
-                    zabbix_groups,
-                    host_group_data,
                     zabbix_groups_map,
                     zabbix_templates,
                     zabbix_proxys,
-                    arguments.proxy_power
+                    arguments.proxy_power,
                 )
             else: # Add device to Zabbix
                 device.createInZabbix(
@@ -554,7 +552,7 @@ class NetworkDevice():
         logger.info(f"Updated host {self.name} with data {kwargs}.")
         self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
 
-    def ConsistencyCheck(self, groups, host_group_data, zabbix_groups_map, templates, proxys, proxy_power):
+    def ConsistencyCheck(self, zabbix_groups_map, templates, proxys, proxy_power):
         """
         Checks if Zabbix object is still valid with Netbox parameters.
         """
@@ -618,7 +616,7 @@ class NetworkDevice():
 
         # Sync the host groups
         n_host_group_ids = []
-        for curr_group in host_group_data:
+        for curr_group in self.hostgroups:
             n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
         n_host_group_ids = sorted(n_host_group_ids)
         z_host_group_ids = sorted(map(lambda x: int(x['groupid']), host['groups']))
