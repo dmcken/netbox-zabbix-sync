@@ -558,7 +558,7 @@ class NetworkDevice():
         """
         Checks if Zabbix object is still valid with Netbox parameters.
         """
-        self.getZabbixGroup(groups)
+        # self.getZabbixGroup(groups)
         self.getZabbixTemplate(templates)
         self.setProxy(proxys)
         host = self.zabbix.host.get(
