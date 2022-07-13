@@ -8,7 +8,7 @@ Sync Netbox devices to Zabbix for monitoring.
 
 # System imports
 import argparse
-from cProfile import label
+import datetime
 import logging
 import os
 import pprint
@@ -30,7 +30,7 @@ lgout.setLevel(logging.DEBUG)
 lgfile = logging.FileHandler(
     os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
-        "sync.log"
+        f"sync-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.log",
     )
 )
 lgfile.setFormatter(log_format)
