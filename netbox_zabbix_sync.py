@@ -618,7 +618,7 @@ class NetworkDevice():
         n_host_group_ids = []
         for curr_group in self.hostgroups:
             n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
-        n_host_group_ids = sorted(n_host_group_ids)
+        n_host_group_ids = sorted(map(lambda x: int(x), n_host_group_ids))
         z_host_group_ids = sorted(map(lambda x: int(x['groupid']), host['groups']))
 
         logger.debug(f"Groups z: {z_host_group_ids} - n: {n_host_group_ids}")
