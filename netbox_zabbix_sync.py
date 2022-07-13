@@ -623,7 +623,7 @@ class NetworkDevice():
         n_host_group_ids = sorted(n_host_group_ids)
         z_host_group_ids = sorted(map(lambda x: int(x['groupid']), host['groups']))
 
-        logger.debug("Groups z: {z_host_group_ids} - n: {n_host_group_ids}")
+        logger.debug(f"Groups z: {z_host_group_ids} - n: {n_host_group_ids}")
 
         if z_host_group_ids != n_host_group_ids:
             group_list = list(map(lambda x: {'groupid': x}, n_host_group_ids))
