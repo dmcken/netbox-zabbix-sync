@@ -625,6 +625,7 @@ class NetworkDevice():
 
         if z_host_group_ids != n_host_group_ids:
             group_list = list(map(lambda x: {'groupid': x}, n_host_group_ids))
+            logger.debug(f"Updating host '{self.name}' with groups {group_list}")
             self.updateZabbixHost(groups=group_list)
 
         # Update host status
