@@ -204,7 +204,7 @@ def main(arguments):
                     arguments.proxy_power,
                 )
             else: # Add device to Zabbix
-                device.createInZabbix(
+                device.create_in_zabbix(
                     zabbix_groups,
                     host_group_data,
                     zabbix_templates,
@@ -481,7 +481,7 @@ class NetworkDevice():
                     logger.warning(err_msg)
                     return False
 
-    def createInZabbix(self, groups, host_group_data, templates, proxys,
+    def create_in_zabbix(self, groups, host_group_data, templates, proxys,
                        description="Host added by Netbox sync script."):
         """
         Creates Zabbix host object with parameters from Netbox object.
