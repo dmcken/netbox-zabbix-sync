@@ -26,8 +26,12 @@ lgout = logging.StreamHandler()
 lgout.setFormatter(log_format)
 lgout.setLevel(logging.DEBUG)
 
-lgfile = logging.FileHandler(os.path.join(os.path.dirname(
-                             os.path.realpath(__file__)), "sync.log"))
+lgfile = logging.FileHandler(
+    os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        "sync.log"
+    )
+)
 lgfile.setFormatter(log_format)
 lgfile.setLevel(logging.DEBUG)
 
@@ -366,8 +370,10 @@ class NetworkDevice():
         OUTPUT: True
         """
         if not self.template_name:
-            e = (f"Device template '{self.nb.device_type.display}' "
-                 "has no Zabbix template defined.")
+            e = (
+                f"Device template '{self.nb.device_type.display}' "
+                "has no Zabbix template defined."
+            )
             logger.info(e)
             raise SyncInventoryError()
         for template in templates:
@@ -378,10 +384,12 @@ class NetworkDevice():
                 logger.debug(e)
                 return True
         else:
-            e = (f"Unable to find template {self.template_name} "
-                 f"for host {self.name} in Zabbix.")
-            logger.warning(e)
-            raise SyncInventoryError(e)
+            err_msg = (
+                f"Unable to find template {self.template_name} "
+                f"for host {self.name} in Zabbix."
+            )
+            logger.warning(err_msg)
+            raise SyncInventoryError(err_msg)
 
     def getZabbixGroup(self, groups):
         """
@@ -397,10 +405,12 @@ class NetworkDevice():
                 logger.debug(e)
                 return True
         else:
-            e = (f"Unable to find group '{self.hostgroup}' "
-                 f"for host {self.name} in Zabbix.")
-            logger.warning(e)
-            raise SyncInventoryError(e)
+            err_msg = (
+                f"Unable to find group '{self.hostgroup}' "
+                f"for host {self.name} in Zabbix."
+            )
+            logger.warning(err_msg)
+            raise SyncInventoryError(err_msg)
 
     def cleanup(self):
         """
@@ -415,10 +425,10 @@ class NetworkDevice():
                 e = f"Deleted host {self.name} from Zabbix."
                 logger.info(e)
                 self.create_journal_entry("warning", "Deleted host from Zabbix")
-            except pyzabbix.ZabbixAPIException as e:
-                e = f"Zabbix returned the following error: {str(e)}."
-                logger.error(e)
-                raise SyncExternalError(e)
+            except pyzabbix.ZabbixAPIException as exc:
+                err_msg = f"Zabbix returned the following error: {str(exc)}."
+                logger.error(err_msg)
+                raise SyncExternalError(err_msg) from exc
 
     def _zabbixHostnameExists(self):
         """
@@ -465,8 +475,8 @@ class NetworkDevice():
                                      f" for {self.name}.")
                         return True
                 else:
-                    e = f"{self.name}: Defined proxy {proxy} not found."
-                    logger.warning(e)
+                    err_msg = f"{self.name}: Defined proxy {proxy} not found."
+                    logger.warning(err_msg)
                     return False
 
     def createInZabbix(self, groups, templates, proxys,
@@ -556,14 +566,18 @@ class NetworkDevice():
             selectParentTemplates=["id"]
         )
         if len(host) > 1:
-            err_msg = (f"Got {len(host)} results for Zabbix hosts "
-                 f"with ID {self.zabbix_id} - hostname {self.name}.")
+            err_msg = (
+                f"Got {len(host)} results for Zabbix hosts "
+                f"with ID {self.zabbix_id} - hostname {self.name}."
+            )
             logger.error(err_msg)
             raise SyncInventoryError(err_msg)
         elif len(host) == 0:
-            e = (f"No Zabbix host found for {self.name}. "
-                 f"This is likely the result of a deleted Zabbix host "
-                 f"without zeroing the ID field in Netbox.")
+            e = (
+                f"No Zabbix host found for {self.name}. "
+                f"This is likely the result of a deleted Zabbix host "
+                f"without zeroing the ID field in Netbox."
+            )
             logger.error(e)
             raise SyncInventoryError(e)
         else:
@@ -572,8 +586,10 @@ class NetworkDevice():
         if host["host"] == self.name:
             logger.debug(f"Device {self.name}: hostname in-sync.")
         else:
-            logger.warning(f"Device {self.name}: hostname OUT of sync. "
-                           f"Received value: {host['host']}")
+            logger.warning(
+                f"Device {self.name}: hostname OUT of sync. "
+                f"Received value: {host['host']}"
+            )
             self.updateZabbixHost(host=self.name)
 
         for template in host["parentTemplates"]:
