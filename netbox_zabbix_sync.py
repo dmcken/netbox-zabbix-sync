@@ -206,7 +206,7 @@ def main(arguments):
             else: # Add device to Zabbix
                 device.create_in_zabbix(
                     zabbix_groups,
-                    host_group_data,
+                    zabbix_groups_map,
                     zabbix_templates,
                     zabbix_proxys
                 )
@@ -481,23 +481,30 @@ class NetworkDevice():
                     logger.warning(err_msg)
                     return False
 
-    def create_in_zabbix(self, groups, host_group_data, templates, proxys,
+    def create_in_zabbix(self, groups, zabbix_groups_map, templates, proxys,
                        description="Host added by Netbox sync script."):
         """
         Creates Zabbix host object with parameters from Netbox object.
         """
         # Check if hostname is already present in Zabbix
         if not self._zabbixHostnameExists():
-            # Get group and template ID's for host
-            if not self.getZabbixGroup(groups):
-                raise SyncInventoryError()
+            # Get group IDs for host
+            n_host_group_ids = []
+            for curr_group in self.hostgroups:
+                n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
+            n_host_group_ids = sorted(map(lambda x: int(x), n_host_group_ids))
+            groups = list(map(lambda x: {'groupid': x}, n_host_group_ids))
+
+            # Set template IDs
             self.getZabbixTemplate(templates)
+
             # Set interface, group and template configuration
             interfaces = self.setInterfaceDetails()
-            groups = [{"groupid": self.group_id}]
             templates = [{"templateid": self.template_id}]
+
             # Set Zabbix proxy if defined
             self.setProxy(proxys)
+
             # Add host to Zabbix
             try:
                 host = self.zabbix.host.create(
