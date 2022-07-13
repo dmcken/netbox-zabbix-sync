@@ -197,7 +197,7 @@ def main(arguments):
 
             # Device is already present in Zabbix
             if device.zabbix_id:
-                device.ConsistencyCheck(
+                device.consistency_check(
                     zabbix_groups_map,
                     zabbix_templates,
                     zabbix_proxys,
@@ -552,11 +552,10 @@ class NetworkDevice():
         logger.info(f"Updated host {self.name} with data {kwargs}.")
         self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
 
-    def ConsistencyCheck(self, zabbix_groups_map, templates, proxys, proxy_power):
+    def consistency_check(self, zabbix_groups_map, templates, proxys, proxy_power):
         """
         Checks if Zabbix object is still valid with Netbox parameters.
         """
-        # self.getZabbixGroup(groups)
         self.getZabbixTemplate(templates)
         self.setProxy(proxys)
         host = self.zabbix.host.get(
@@ -606,14 +605,6 @@ class NetworkDevice():
             logger.warning(f"Device {self.name}: template OUT of sync.")
             self.updateZabbixHost(templates=self.template_id)
 
-        # for group in host["groups"]:
-        #     if group["groupid"] == self.group_id:
-        #         logger.debug(f"Device {self.name}: hostgroup in-sync.")
-        #         break
-        # else:
-        #     logger.warning(f"Device {self.name}: hostgroup OUT of sync.")
-        #     self.updateZabbixHost(groups={'groupid': self.group_id})
-
         # Sync the host groups
         n_host_group_ids = []
         for curr_group in self.hostgroups:
@@ -627,6 +618,8 @@ class NetworkDevice():
             group_list = list(map(lambda x: {'groupid': x}, n_host_group_ids))
             logger.debug(f"Updating host '{self.name}' with groups {group_list}")
             self.updateZabbixHost(groups=group_list)
+        else:
+            logger.debug(f"Device {self.name}: hostgroups in-sync.")
 
         # Update host status
         if int(host["status"]) == self.zabbix_state:
