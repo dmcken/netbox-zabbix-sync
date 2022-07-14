@@ -36,7 +36,7 @@ lgfile = logging.FileHandler(
 lgfile.setFormatter(log_format)
 lgfile.setLevel(logging.DEBUG)
 
-logger = logging.getLogger("Netbox-Zabbix-sync")
+logger = logging.getLogger("netbox-zabbix-sync")
 logger.addHandler(lgout)
 logger.addHandler(lgfile)
 logger.setLevel(logging.WARNING)
@@ -195,15 +195,17 @@ def main(arguments):
             zabbix_groups_map = {v['name']:v for v in zabbix_groups}
             host_group_data = device.create_zabbix_hostgroups(zabbix_groups_map)
 
-            # Device is already present in Zabbix
-            if device.zabbix_id:
+            zabbix_groups    = zabbix.hostgroup.get(output=['name'])
+            zabbix_groups_map = {v['name']:v for v in zabbix_groups}
+
+            if device.zabbix_id: # Update Zabbix
                 device.consistency_check(
                     zabbix_groups_map,
                     zabbix_templates,
                     zabbix_proxys,
                     arguments.proxy_power,
                 )
-            else: # Add device to Zabbix
+            else: # Add to Zabbix
                 device.create_in_zabbix(
                     zabbix_groups,
                     zabbix_groups_map,
