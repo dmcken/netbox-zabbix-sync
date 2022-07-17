@@ -229,6 +229,7 @@ class NetworkDevice():
         self.zabbix = zabbix
         self.zabbix_id = None
         self.tenant = nb_device.tenant
+        self.template_id = None
         self.hostgroup = None
         self.hostgroups = []
         self.zbxproxy = "0"
