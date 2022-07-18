@@ -1,2 +1,3 @@
 pynetbox
+python-dotenv
 pyzabbix

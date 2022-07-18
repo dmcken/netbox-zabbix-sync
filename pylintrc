@@ -1,0 +1,9 @@
+[MASTER]
+#jobs=4
+
+[MESSAGES CONTROL]
+disable=logging-fstring-interpolation
+
+[REPORTS]
+output-format=text
+files-output=no
