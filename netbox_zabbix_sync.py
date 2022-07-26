@@ -72,8 +72,7 @@ class ProxyConfigError(SyncError):
     pass
 
 def fetch_sync_config():
-    '''
-    Fetches config parameters for the netbox to zabbix sync.
+    '''Fetches config parameters for the netbox to zabbix sync.
 
     Checks for missing environment variable first
     '''
@@ -87,15 +86,20 @@ def fetch_sync_config():
         "ZABBIX_TOKEN",
         "NETBOX_HOST",
         "NETBOX_TOKEN",
+        "NETBOX_ROLE_IGNORE",
     ]
     for var in env_vars:
         config[var] = os.environ.get(var, None)
 
+    # Parse the config entries that require it.
+    if config["NETBOX_ROLE_IGNORE"] is not None:
+        parts = config["NETBOX_ROLE_IGNORE"].split(',')
+        config["NETBOX_ROLE_IGNORE"] = parts
+
     return config
 
 def connect_zabbix(config):
-    '''
-    Connect to zabbix API
+    '''Connect to zabbix API.
 
     Use token if present or username and password if not.
 
@@ -121,7 +125,8 @@ def connect_zabbix(config):
     return zabbix
 
 def main(arguments):
-    """Run the sync process."""
+    """Run the sync process.
+    """
     # set environment variables
     if arguments.verbose:
         logger.warning("Setting log level to debug")
@@ -149,6 +154,12 @@ def main(arguments):
     # Go through all Netbox devices
     for nb_device in netbox_devices:
         try:
+            # Ignore rules
+            if nb_device.device_role.slug in config['NETBOX_ROLE_IGNORE']:
+                logger.debug(f"Skipping host: {nb_device.name}")
+                continue
+
+            # Lets start dealing with the device
             device = NetworkDevice(
                 nb_device,
                 zabbix,
@@ -160,13 +171,15 @@ def main(arguments):
             if device.isCluster() and arguments.cluster:
                 # Check if device is master or slave
                 if device.promoteMasterDevice():
-                    logger.info(f"Device {device.name} is part of cluster and primary.")
+                    err_msg = f"Device {device.name} is part of " +\
+                        "cluster and primary."
+                    logger.info(err_msg)
                 else:
                     # Device is secondary in cluster.
                     # Don't continue with this device.
-                    e = f"Device {device.name} is part of cluster " \
-                        f"but not primary. Skipping this host..."
-                    logger.info(e)
+                    err_msg = f"Device {device.name} is part of cluster " \
+                              f"but not primary. Skipping this host..."
+                    logger.info(err_msg)
                     continue
 
             # Checks if device is in cleanup state
@@ -230,11 +243,11 @@ class NetworkDevice():
         self.zabbix_id = None
         self.tenant = nb_device.tenant
         self.template_id = None
-        self.hostgroup = None
+        self.hostgroup = None # Should no longer be needed
         self.hostgroups = []
         self.zbxproxy = "0"
         self.zabbix_state = 0
-        self.hg_format = [
+        self.hg_format = [ # Should no longer be needed
             self.nb.site.name,
             self.nb.device_type.manufacturer.name,
             self.nb.device_role.name
@@ -279,7 +292,10 @@ class NetworkDevice():
             raise SyncInventoryError(e)
 
     def setHostgroup(self):
-        """Sets hostgroup to a string with hg_format parameters."""
+        """Sets hostgroup to a string with hg_format parameters.
+
+        Depreciated
+        """
         self.hostgroup = "/".join(self.hg_format)
 
     def set_host_groups(self):
@@ -307,8 +323,7 @@ class NetworkDevice():
                 self.hostgroups.append(f"{name} - {value}")
 
     def create_zabbix_hostgroups(self, zabbix_groups_map):
-        """
-        Creates Zabbix host group based on hostgroup format.
+        """Creates Zabbix host group based on hostgroup format.
         """
         group_data = []
         for curr_hostgroup in self.hostgroups:

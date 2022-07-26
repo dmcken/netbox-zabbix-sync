@@ -11,6 +11,9 @@ From now on only compatible with Netbox 3.x.
 * ZABBIX_PASS="Password"
 * NETBOX_HOST="https://netbox.local"
 * NETBOX_TOKEN="secrettoken"
+* NETBOX_ROLE_IGNORE=patch-panel,media-converter
+
+NETBOX_ROLE_IGNORE - A comma-separated list of device role slugs of device roles that should be ignored, ususally because they are unmanaged.
 
 #### Flags
 |  Flag | Option  |  Description |
