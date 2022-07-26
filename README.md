@@ -1,19 +1,30 @@
+# General
 A script to sync the Netbox device inventory to Zabbix.
 
-## Requires pyzabbix and pynetbox.
-From now on only compatible with Netbox 3.x.
+Only compatible with Netbox 3+
 
-### Script settings
+## Script settings
 #### Enviroment variables
 
-* ZABBIX_HOST="https://zabbix.local"
-* ZABBIX_USER="username"
-* ZABBIX_PASS="Password"
-* NETBOX_HOST="https://netbox.local"
-* NETBOX_TOKEN="secrettoken"
-* NETBOX_ROLE_IGNORE=patch-panel,media-converter
+| ENV variable | Example Value | Description |
+| ------------ | ------------- | ----------- |
+| NETBOX_HOST | https://netbox.local | Base URL to access netbox web interface |
+| NETBOX_TOKEN |   | Token to login to the netbox API with |
+| NETBOX_ROLE_IGNORE | patch-panel,media-converter | A comma-separated list of device role slugs of device roles that should be ignored, ususally because they are unmanaged |
+| ZABBIX_HOST | https://zabbix.local | Base URL to access zabbix web interface |
+| ZABBIX_USER |   | Username to login to zabbix with |
+| ZABBIX_PASS |   | Password to login to zabbix with |
+| ZABBIX_TOKEN |   | Token to login to zabbix with instead of the username and password |
 
-NETBOX_ROLE_IGNORE - A comma-separated list of device role slugs of device roles that should be ignored, ususally because they are unmanaged.
+Example .env file
+```
+ZABBIX_HOST="https://zabbix.local"
+ZABBIX_USER="username"
+ZABBIX_PASS="Password"
+NETBOX_HOST="https://netbox.local"
+NETBOX_TOKEN="secrettoken"
+NETBOX_ROLE_IGNORE="patch-panel,media-converter"
+```
 
 #### Flags
 |  Flag | Option  |  Description |
