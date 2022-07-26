@@ -14,7 +14,7 @@ Only compatible with Netbox 3+
 | ZABBIX_HOST | https://zabbix.local | Base URL to access zabbix web interface |
 | ZABBIX_USER |   | Username to login to zabbix with |
 | ZABBIX_PASS |   | Password to login to zabbix with |
-| ZABBIX_TOKEN |   | Token to login to zabbix with instead of the username and password |
+| ZABBIX_TOKEN |   | Named Token to login to zabbix with instead of the username and password (Zabbix 5.4+) |
 
 Example .env file
 ```
