@@ -135,7 +135,7 @@ Note: Not all SNMP data is required for a working configuration. [The following 
 #### Permissions
 Make sure that the user has proper permissions for device read and modify (modify to set the Zabbix HostID custom field) operations.
 
-#### Custom links
+### Custom links
 To make the user experience easier you could add a custom link that redirects users to the Zabbix latest data.
 
 * Name: ```zabbix_latestData```
