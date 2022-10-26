@@ -10,7 +10,7 @@ Only compatible with Netbox 3+
 | ------------ | ------------- | ----------- |
 | NETBOX_HOST | https://netbox.local | Base URL to access netbox web interface |
 | NETBOX_TOKEN |   | Token to login to the netbox API with |
-| NETBOX_ROLE_IGNORE | patch-panel,media-converter | A comma-separated list of device role slugs of device roles that should be ignored, ususally because they are unmanaged |
+| NETBOX_ROLE_IGNORE | patch-panel,media-converter | A comma-separated list of device role slugs of device roles that should be ignored, usually because they are unmanaged devices |
 | ZABBIX_HOST | https://zabbix.local | Base URL to access zabbix web interface |
 | ZABBIX_USER |   | Username to login to zabbix with |
 | ZABBIX_PASS |   | Password to login to zabbix with |
