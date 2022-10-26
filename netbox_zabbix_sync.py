@@ -588,7 +588,9 @@ class NetworkDevice():
         self.getZabbixTemplate(templates)
         self.setProxy(proxys)
         host = self.zabbix.host.get(
-            filter={'hostid': self.zabbix_id},
+            filter={
+                'hostid': self.zabbix_id,
+            },
             selectInterfaces=[
                 'type',
                 'ip',
@@ -596,8 +598,8 @@ class NetworkDevice():
                 'details',
                 'interfaceid',
             ],
-            selectGroups=["id"],
-            selectParentTemplates=["id"]
+            selectGroups=["groupid"],
+            selectParentTemplates=["templateid"],
         )
         if len(host) > 1:
             err_msg = (
