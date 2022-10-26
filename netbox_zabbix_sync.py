@@ -208,7 +208,7 @@ def main(arguments):
             zabbix_groups_map = {v['name']:v for v in zabbix_groups}
             host_group_data = device.create_zabbix_hostgroups(zabbix_groups_map)
 
-            zabbix_groups    = zabbix.hostgroup.get(output=['name'])
+            zabbix_groups    = zabbix.hostgroup.get(output=['groupid', 'name'])
             zabbix_groups_map = {v['name']:v for v in zabbix_groups}
 
             if device.zabbix_id: # Update Zabbix
