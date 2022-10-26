@@ -509,7 +509,11 @@ class NetworkDevice():
             # Get group IDs for host
             n_host_group_ids = []
             for curr_group in self.hostgroups:
-                n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
+                try:
+                    n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
+                except KeyError:
+                    logger.error(f"Missing 'groupid' on: {curr_group}")
+                    raise
             n_host_group_ids = sorted(map(lambda x: int(x), n_host_group_ids))
             groups = list(map(lambda x: {'groupid': x}, n_host_group_ids))
 
