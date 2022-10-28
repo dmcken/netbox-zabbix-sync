@@ -394,7 +394,7 @@ class NetworkDevice():
                 f"Device template '{self.nb.device_type.display}' "
                 "has no Zabbix template defined."
             )
-            logger.info(e)
+            logger.error(e)
             raise SyncInventoryError()
         for template in templates:
             if template['name'] == self.template_name:
