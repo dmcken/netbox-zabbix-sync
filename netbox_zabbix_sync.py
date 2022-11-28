@@ -30,7 +30,7 @@ lgout.setLevel(logging.DEBUG)
 lgfile = logging.FileHandler(
     os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
-        f"sync-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.log",
+        f"sync-{datetime.datetime.now().strftime('%Y-%m-%d')}.log",
     )
 )
 lgfile.setFormatter(log_format)
