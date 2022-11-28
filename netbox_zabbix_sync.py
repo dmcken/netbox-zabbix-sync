@@ -322,6 +322,13 @@ class NetworkDevice():
             if value:
                 self.hostgroups.append(f"{name} - {value}")
 
+        # Handle custom tags
+        for curr_tag in self.nb.tags:
+            if curr_tag['name'][:12] == 'ZabbixGroup#':
+                self.hostgroups.append(curr_tag['name'][12:])
+
+
+
     def create_zabbix_hostgroups(self, zabbix_groups_map):
         """Creates Zabbix host group based on hostgroup format.
         """
