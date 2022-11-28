@@ -34,3 +34,11 @@ And this field for the Zabbix template
 | ZABBIX_PASS |   | Password to login to zabbix with |
 | ZABBIX_TOKEN |   | Named Token to login to zabbix with instead of the username and password (Zabbix 5.4+) |
 
+Example .env file
+```
+ZABBIX_HOST="https://zabbix.local"
+ZABBIX_USER="username"
+ZABBIX_PASS="Password"
+NETBOX_HOST="https://netbox.local"
+NETBOX_TOKEN="secrettoken"
+NETBOX_ROLE_IGNORE="patch-panel,media-converter"
