@@ -4,27 +4,6 @@ A script to sync the Netbox device inventory to Zabbix.
 Only compatible with Netbox 3+
 
 # Script settings
-### Enviroment variables
-
-| ENV variable | Example Value | Description |
-| ------------ | ------------- | ----------- |
-| NETBOX_HOST | https://netbox.local | Base URL to access netbox web interface |
-| NETBOX_TOKEN |   | Token to login to the netbox API with |
-| NETBOX_ROLE_IGNORE | patch-panel,media-converter | A comma-separated list of device role slugs of device roles that should be ignored, usually because they are unmanaged devices |
-| ZABBIX_HOST | https://zabbix.local | Base URL to access zabbix web interface |
-| ZABBIX_USER |   | Username to login to zabbix with |
-| ZABBIX_PASS |   | Password to login to zabbix with |
-| ZABBIX_TOKEN |   | Named Token to login to zabbix with instead of the username and password (Zabbix 5.4+) |
-
-Example .env file
-```
-ZABBIX_HOST="https://zabbix.local"
-ZABBIX_USER="username"
-ZABBIX_PASS="Password"
-NETBOX_HOST="https://netbox.local"
-NETBOX_TOKEN="secrettoken"
-NETBOX_ROLE_IGNORE="patch-panel,media-converter"
-```
 
 ### Command line flags
 |  Flag | Option  |  Description |
@@ -55,23 +34,7 @@ Groups are created and the hosts automatically populated based on the following 
 ### Custom groups:
 Now a custom tag of "ZabbixGroup#Hello" will proceed to create the group "Hello" if it doesn't exist and place the device inside of that group.
 
-### Custom fields
-Use the following custom fields in Netbox to map the Zabbix URL:
-* Model(s): dcim > device
-* Type: Integer
-* Name: zabbix_hostid
-* Required: False
-* Default: null
-
-And this field for the Zabbix template
-* Model(s): dcim > device_type
-* Type: Text
-* Name: zabbix_template
-* Required: False
-* Default: null
-
-
-### Netbox device status
+## Netbox device status
 By setting a status on a Netbox device you determine how the host is added (or updated) in Zabbix. There are, by default, 3 options:
 * Delete the host from Zabbix (triggered by Netbox status "Decommissioning" and "Inventory")
 * Create the host in Zabbix but with a disabled status (Trigger by "Offline", "Planned", "Staged" and "Failed")
@@ -81,7 +44,7 @@ You can modify this behaviour by changing the following list variables in the sc
  - zabbix_device_removal
  - zabbix_device_disable
 
-### Set proxy within Netbox
+## Set proxy within Netbox
 You can set the proxy for a device using the 'proxy' key in config context.
 ```json
 {
@@ -92,7 +55,7 @@ You can set the proxy for a device using the 'proxy' key in config context.
 ```
 Because of the posible amount of destruction when setting up Netbox but forgetting the proxy command, the sync works a bit different. By default everything is synced except in a situation where the Zabbix host has a proxy configured but nothing is configured in Netbox. To force deletion and a full sync, use the -p flag.
 
-### Set interface parameters within Netbox
+## Set interface parameters within Netbox
 When adding a new device, you can set the interface type with custom context.
 Due to Zabbix limitations of changing interface type with a linked template, changing the interface type from within Netbox is not supported and the script will generate an error.
 
@@ -108,7 +71,7 @@ To configure the interface parameters you'll need to use custom context. Custom 
  * Set the custom context on a device role
  * Set the custom context on a site or region
 
-#### Agent interface configuration example
+### Agent interface configuration example
 ```json
 {
     "zabbix": {
@@ -117,7 +80,7 @@ To configure the interface parameters you'll need to use custom context. Custom 
     }
 }
 ```
-#### SNMPv2 interface configuration example
+### SNMPv2 interface configuration example
 ```json
 {
     "zabbix": {
@@ -131,7 +94,7 @@ To configure the interface parameters you'll need to use custom context. Custom 
     }
 }
 ```
-##### SNMPv3 interface configuration example
+#### SNMPv3 interface configuration example
 ```json
 {
     "zabbix": {
@@ -149,10 +112,10 @@ To configure the interface parameters you'll need to use custom context. Custom 
 ```
 Note: Not all SNMP data is required for a working configuration. [The following parameters are allowed ](https://www.zabbix.com/documentation/current/manual/api/reference/hostinterface/object#details_tag "The following parameters are allowed ")but are not all required, depending on your environment.
 
-#### Permissions
+## Permissions
 Make sure that the user has proper permissions for device read and modify (modify to set the Zabbix HostID custom field) operations.
 
-### Custom links
+## Custom links
 To make the user experience easier you could add a custom link that redirects users to the Zabbix latest data.
 
 * Name: ```zabbix_latestData```
