@@ -234,10 +234,14 @@ class NetworkDevice():
     INPUT: (Netbox device class, ZabbixAPI class, journal flag, NB journal class)
     """
 
+    _host_translations = str.maketrans({
+        '>': '_',
+    })
+
     def __init__(self, nb_device, zabbix, nb_journal_class, journal=None):
         self.nb = nb_device
         self.id = nb_device.id
-        self.name = nb_device.name
+        self.name = NetworkDevice._clean_hostname(nb_device.name)
         self.status = nb_device.status.label
         self.zabbix = zabbix
         self.zabbix_id = None
@@ -259,6 +263,19 @@ class NetworkDevice():
         self.set_host_groups()
 
         logger.info(f"Host groups: {pprint.pformat(self.hostgroups)}")
+
+    @staticmethod
+    def _clean_hostname(nb_name: str) -> str:
+        '''Returns a cleaned name that Zabbix will accept.
+
+        Per:
+        https://www.zabbix.com/documentation/current/en/manual/config/hosts/host
+
+        Alphanumerics, spaces, dots, dashes and underscores are allowed
+        '''
+
+        return nb_name.translate(NetworkDevice._host_translations)
+
 
     def _setBasics(self):
         """
