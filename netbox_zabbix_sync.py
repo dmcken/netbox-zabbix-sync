@@ -588,8 +588,7 @@ class NetworkDevice():
         """
         try:
             groupid = self.zabbix.hostgroup.create(name=self.hostgroup)
-            e = f"Added hostgroup '{self.hostgroup}'."
-            logger.info(e)
+            logger.info(f"Added hostgroup '{self.hostgroup}'.")
             data = {'groupid': groupid["groupids"][0], 'name': self.hostgroup}
             return data
         except pyzabbix.ZabbixAPIException as exc:
@@ -764,7 +763,7 @@ class NetworkDevice():
                 except pyzabbix.ZabbixAPIException as exc:
                     err_msg = f"Zabbix returned the following error: {str(exc)}."
                     logger.error(err_msg)
-                    raise SyncExternalError(err_msg)
+                    raise SyncExternalError(err_msg) from exc
             else:
                 # If no updates are found, Zabbix interface is in-sync
                 debug_msg = f"Device {self.name}: interface in-sync."
