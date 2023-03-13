@@ -174,9 +174,9 @@ def main(arguments):
             )
             # Checks if device is part of cluster.
             # Requires the cluster argument.
-            if device.isCluster() and arguments.cluster:
+            if device.is_cluster() and arguments.cluster:
                 # Check if device is master or slave
-                if device.promoteMasterDevice():
+                if device.promote_master_device():
                     err_msg = f"Device {device.name} is part of " +\
                         "cluster and primary."
                     logger.info(err_msg)
@@ -264,8 +264,8 @@ class NetworkDevice():
         ]
         self.journal = journal
         self.nb_journals = nb_journal_class
-        self._setBasics()
-        self.setHostgroup()
+        self._set_basics()
+        self.set_hostgroup()
         self.set_host_groups()
 
         logger.info(f"Host groups: {pprint.pformat(self.hostgroups)}")
@@ -281,7 +281,7 @@ class NetworkDevice():
         '''
         return nb_name.translate(NetworkDevice._host_translations)
 
-    def _setBasics(self):
+    def _set_basics(self):
         """
         Sets basic information like IP address.
         """
@@ -312,7 +312,7 @@ class NetworkDevice():
             logger.warning(e)
             raise SyncInventoryError(e)
 
-    def setHostgroup(self):
+    def set_hostgroup(self):
         """Sets hostgroup to a string with hg_format parameters.
 
         Depreciated
@@ -373,7 +373,7 @@ class NetworkDevice():
 
         return group_data
 
-    def isCluster(self):
+    def is_cluster(self):
         """
         Checks if device is part of cluster.
         """
@@ -382,24 +382,24 @@ class NetworkDevice():
         else:
             return False
 
-    def getClusterMaster(self):
+    def get_cluster_master(self):
         """
         Returns chassis master ID.
         """
-        if not self.isCluster():
+        if not self.is_cluster():
             e = f"Unable to proces {self.name} for cluster calculation: not part of a cluster."
             logger.warning(e)
             raise SyncInventoryError(e)
         else:
             return self.nb.virtual_chassis.master.id
 
-    def promoteMasterDevice(self):
+    def promote_master_device(self):
         """
         If device is Primary in cluster,
         promote device name to the cluster name.
         Returns True if succesfull, returns False if device is secondary.
         """
-        masterid = self.getClusterMaster()
+        masterid = self.get_cluster_master()
         if masterid == self.id:
             logger.debug(f"Device {self.name} is primary cluster member. "
                          f"Modifying hostname from {self.name} to " +
@@ -411,7 +411,7 @@ class NetworkDevice():
             logger.debug(f"Device {self.name} is non-primary cluster member.")
             return False
 
-    def getZabbixTemplate(self, templates):
+    def get_zabbix_template(self, templates):
         """
         Returns Zabbix template ID
         INPUT: list of templates
@@ -439,7 +439,7 @@ class NetworkDevice():
             logger.warning(err_msg)
             raise SyncInventoryError(err_msg)
 
-    def getZabbixGroup(self, groups):
+    def get_zabbix_group(self, groups):
         """
         Returns Zabbix group ID
         INPUT: list of hostgroups
@@ -478,7 +478,7 @@ class NetworkDevice():
                 logger.error(err_msg)
                 raise SyncExternalError(err_msg) from exc
 
-    def _zabbixHostnameExists(self):
+    def _zabbix_hostname_exists(self):
         """
         Checks if hostname exists in Zabbix.
         """
@@ -488,7 +488,7 @@ class NetworkDevice():
         else:
             return False
 
-    def setInterfaceDetails(self):
+    def set_interface_details(self):
         """
         Checks interface parameters from Netbox and
         creates a model for the interface to be used in Zabbix.
@@ -510,7 +510,7 @@ class NetworkDevice():
             logger.warning(exc)
             raise SyncInventoryError(exc) from None
 
-    def setProxy(self, proxy_list):
+    def set_proxy(self, proxy_list):
         '''
         Check if Zabbix Proxy has been defined in config context
         '''
@@ -535,7 +535,7 @@ class NetworkDevice():
         Creates Zabbix host object with parameters from Netbox object.
         """
         # Check if hostname is already present in Zabbix
-        if not self._zabbixHostnameExists():
+        if not self._zabbix_hostname_exists():
             # Get group IDs for host
             n_host_group_ids = []
             for curr_group in self.hostgroups:
@@ -548,14 +548,14 @@ class NetworkDevice():
             groups = list(map(lambda x: {'groupid': x}, n_host_group_ids))
 
             # Set template IDs
-            self.getZabbixTemplate(templates)
+            self.get_zabbix_template(templates)
 
             # Set interface, group and template configuration
-            interfaces = self.setInterfaceDetails()
+            interfaces = self.set_interface_details()
             templates = [{"templateid": self.template_id}]
 
             # Set Zabbix proxy if defined
-            self.setProxy(proxys)
+            self.set_proxy(proxys)
 
             # Add host to Zabbix
             try:
@@ -582,7 +582,7 @@ class NetworkDevice():
         else:
             logger.warning(f"Unable to add {self.name} to Zabbix: host already present.")
 
-    def createZabbixHostgroup(self):
+    def create_zabbix_hostgroup(self):
         """
         Creates Zabbix host group based on hostgroup format.
         """
@@ -597,7 +597,7 @@ class NetworkDevice():
             logger.error(err_msg)
             raise SyncExternalError(err_msg) from exc
 
-    def updateZabbixHost(self, **kwargs):
+    def update_zabbix_host(self, **kwargs):
         """
         Updates Zabbix host with given parameters.
         INPUT: Key word arguments for Zabbix host object.
@@ -615,8 +615,8 @@ class NetworkDevice():
         """
         Checks if Zabbix object is still valid with Netbox parameters.
         """
-        self.getZabbixTemplate(templates)
-        self.setProxy(proxys)
+        self.get_zabbix_template(templates)
+        self.set_proxy(proxys)
         host = self.zabbix.host.get(
             filter={
                 'hostid': self.zabbix_id,
@@ -656,7 +656,7 @@ class NetworkDevice():
                 f"Device {self.name}: hostname OUT of sync. "
                 f"Received value: {host['host']}"
             )
-            self.updateZabbixHost(host=self.name)
+            self.update_zabbix_host(host=self.name)
 
         for template in host["parentTemplates"]:
             if template["templateid"] == self.template_id:
@@ -664,7 +664,7 @@ class NetworkDevice():
                 break
         else:
             logger.warning(f"Device {self.name}: template OUT of sync.")
-            self.updateZabbixHost(templates=self.template_id)
+            self.update_zabbix_host(templates=self.template_id)
 
         # Sync the host groups
         n_host_group_ids = []
@@ -678,7 +678,7 @@ class NetworkDevice():
         if z_host_group_ids != n_host_group_ids:
             group_list = list(map(lambda x: {'groupid': x}, n_host_group_ids))
             logger.debug(f"Updating host '{self.name}' with groups {group_list}")
-            self.updateZabbixHost(groups=group_list)
+            self.update_zabbix_host(groups=group_list)
         else:
             logger.debug(f"Device {self.name}: hostgroups in-sync.")
 
@@ -687,7 +687,7 @@ class NetworkDevice():
             logger.debug(f"Device {self.name}: status in-sync.")
         else:
             logger.warning(f"Device {self.name}: status OUT of sync.")
-            self.updateZabbixHost(status=str(self.zabbix_state))
+            self.update_zabbix_host(status=str(self.zabbix_state))
 
         # Check if a proxy has been defined
         if self.zbxproxy != "0":
@@ -697,13 +697,13 @@ class NetworkDevice():
             else:
                 # Proxy diff, update value
                 logger.warning(f"Device {self.name}: proxy OUT of sync.")
-                self.updateZabbixHost(proxy_hostid=self.zbxproxy)
+                self.update_zabbix_host(proxy_hostid=self.zbxproxy)
         else:
             if not host["proxy_hostid"] == "0":
                 if proxy_power:
                     # If the -p flag has been issued,
                     # delete the proxy link in Zabbix
-                    self.updateZabbixHost(proxy_hostid=self.zbxproxy)
+                    self.update_zabbix_host(proxy_hostid=self.zbxproxy)
                 else:
                     # Instead of deleting the proxy config in zabbix and
                     # forcing potential data loss,
@@ -716,7 +716,7 @@ class NetworkDevice():
         if len(host['interfaces']) == 1:
             updates = {}
             # Go through each key / item and check if it matches Zabbix
-            for key, item in self.setInterfaceDetails()[0].items():
+            for key, item in self.set_interface_details()[0].items():
                 # Check if Netbox value is found in Zabbix
                 if key in host["interfaces"][0]:
                     # If SNMP is used, go through nested dict
@@ -776,7 +776,7 @@ class NetworkDevice():
                 "Manual interfention required."
             )
             logger.error(err_msg)
-            SyncInventoryError(err_msg)
+            raise SyncInventoryError(err_msg)
 
     def create_journal_entry(self, severity, message):
         '''
@@ -796,8 +796,8 @@ class NetworkDevice():
             }
             try:
                 self.nb_journals.create(journal)
+                logger.debug(f"Created journal entry in NB for host {self.name}")
                 return True
-                logger.debug(f"Crated journal entry in NB for host {self.name}")
             except pynetbox.RequestError as exc:
                 logger.warning(
                     "Unable to create journal entry for "
