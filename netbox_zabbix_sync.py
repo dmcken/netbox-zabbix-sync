@@ -507,7 +507,9 @@ class NetworkDevice():
             raise SyncInventoryError(exc) from None
 
     def setProxy(self, proxy_list):
-        # check if Zabbix Proxy has been defined in config context
+        '''
+        Check if Zabbix Proxy has been defined in config context
+        '''
         if "zabbix" in self.nb.config_context:
             if "proxy" in self.nb.config_context["zabbix"]:
                 proxy = self.nb.config_context["zabbix"]["proxy"]
