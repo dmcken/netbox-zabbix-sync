@@ -501,10 +501,10 @@ class NetworkDevice():
             else:
                 interface.set_default()
             return [interface.interface]
-        except InterfaceConfigError as e:
-            e = f"{self.name}: {e}"
-            logger.warning(e)
-            raise SyncInventoryError(e)
+        except InterfaceConfigError as exc:
+            exc = f"{self.name}: {exc}"
+            logger.warning(exc)
+            raise SyncInventoryError(exc) from None
 
     def setProxy(self, proxy_list):
         # check if Zabbix Proxy has been defined in config context
@@ -715,7 +715,7 @@ class NetworkDevice():
                 if key in host["interfaces"][0]:
                     # If SNMP is used, go through nested dict
                     # to compare SNMP parameters
-                    if type(item) == dict and key == "details":
+                    if isinstance(item, dict) and key == "details":
                         for k, i in item.items():
                             if k in host["interfaces"][0][key]:
                                 # Set update if values don't match
@@ -830,30 +830,22 @@ class ZabbixInterface():
             if "snmp" in self.context["zabbix"]:
                 snmp = self.context["zabbix"]["snmp"]
                 self.interface["details"] = {}
-                # Checks if bulk config has been defined
-                if snmp.get("bulk"):
-                    self.interface["details"]["bulk"] = str(snmp.pop("bulk"))
-                else:
-                    # Fallback to bulk enabled if not specified
-                    self.interface["details"]["bulk"] = "1"
+                # Checks if bulk config has been defined, default to 1.
+                self.interface["details"]["bulk"] = snmp.get('bulk', '1')
+
                 # SNMP Version config is required in Netbox config context
-                if snmp.get("version"):
-                    self.interface["details"]["version"] = str(snmp.pop("version"))
-                else:
-                    e = "SNMP version option is not defined."
-                    raise InterfaceConfigError(e)
-                # If version 2 is used, get community string
-                if self.interface["details"]["version"] == '2':
+                self.interface["details"]["version"] = str(snmp.get("version", None))
+                if self.interface["details"]["version"] in ['1','2']:
+                    # If version 1 or 2 is used, get community string
                     if "community" in snmp:
                         community = snmp["community"]
                         self.interface["details"]["community"] = str(community)
                     else:
-                        e = ("No SNMP community string "
-                             "defined in custom context.")
-                        raise InterfaceConfigError(e)
-                # If version 3 has been used, get all
-                # SNMPv3 Netbox related configs
+                        logger.debug("No SNMP community string "
+                            "defined in custom context, using default")
                 elif self.interface["details"]["version"] == '3':
+                    # If version 3 has been used, get all
+                    # SNMPv3 Netbox related configs
                     items = ["securityname", "securitylevel", "authpassphrase",
                              "privpassphrase", "authprotocol", "privprotocol",
                              "contextname"]
@@ -861,7 +853,8 @@ class ZabbixInterface():
                         if key in items:
                             self.interface["details"][key] = str(item)
                 else:
-                    raise InterfaceConfigError("Unsupported SNMP version.")
+                    raise InterfaceConfigError('Unsupported SNMP version '
+                        f'{self.interface["details"]["version"]}')
             else:
                 raise InterfaceConfigError("Interface type SNMP but no parameters provided.")
         else:
