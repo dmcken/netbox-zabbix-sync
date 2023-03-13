@@ -497,7 +497,8 @@ class NetworkDevice():
             if interface.get_context():
                 # If device is SNMP type, add aditional information.
                 if interface.interface["type"] == 2:
-                    interface.set_snmp()
+                    # interface.set_snmp()
+                    pass
             else:
                 interface.set_default()
             return [interface.interface]
