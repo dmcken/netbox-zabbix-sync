@@ -715,7 +715,7 @@ class NetworkDevice():
                 if key in host["interfaces"][0]:
                     # If SNMP is used, go through nested dict
                     # to compare SNMP parameters
-                    if type(item) == dict and key == "details":
+                    if isinstance(item, dict) and key == "details":
                         for k, i in item.items():
                             if k in host["interfaces"][0][key]:
                                 # Set update if values don't match
