@@ -501,10 +501,10 @@ class NetworkDevice():
             else:
                 interface.set_default()
             return [interface.interface]
-        except InterfaceConfigError as e:
-            e = f"{self.name}: {e}"
-            logger.warning(e)
-            raise SyncInventoryError(e)
+        except InterfaceConfigError as exc:
+            exc = f"{self.name}: {exc}"
+            logger.warning(exc)
+            raise SyncInventoryError(exc) from None
 
     def setProxy(self, proxy_list):
         # check if Zabbix Proxy has been defined in config context
