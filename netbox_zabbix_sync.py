@@ -54,21 +54,27 @@ class SyncError(Exception):
     '''Any errors when sync'ing a device'''
 
 class SyncExternalError(SyncError):
+    '''An error from an external system'''
     pass
 
 class SyncInventoryError(SyncError):
+    '''To determine'''
     pass
 
 class SyncDuplicateError(SyncError):
+    '''A duplicate was found when attempting to sync'''
     pass
 
 class EnvironmentVarError(SyncError):
+    '''To determine'''
     pass
 
 class InterfaceConfigError(SyncError):
+    '''Error configuring the interface on zabbix'''
     pass
 
 class ProxyConfigError(SyncError):
+    '''Error setting the proxy on zabbix.'''
     pass
 
 def fetch_sync_config():
