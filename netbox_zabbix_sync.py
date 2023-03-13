@@ -273,9 +273,7 @@ class NetworkDevice():
 
         Alphanumerics, spaces, dots, dashes and underscores are allowed
         '''
-
         return nb_name.translate(NetworkDevice._host_translations)
-
 
     def _setBasics(self):
         """
