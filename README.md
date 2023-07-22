@@ -80,6 +80,20 @@ To configure the interface parameters you'll need to use custom context. Custom 
     }
 }
 ```
+### SNMPv1 interface configuration example (bulk updates turned off)
+```json
+{
+    "zabbix": {
+        "interface_port": 161,
+        "interface_type": 2,
+        "snmp": {
+            "bulk": 0,
+            "community": "SecretCommunity",
+            "version": 1
+        }
+    }
+}
+```
 ### SNMPv2 interface configuration example
 ```json
 {
