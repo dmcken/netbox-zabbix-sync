@@ -44,6 +44,7 @@ logger.setLevel(logging.WARNING)
 # Set template and device Netbox "custom field" names
 TEMPLATE_CF = "zabbix_template"
 DEVICE_CF = "zabbix_hostid"
+SNMP_CF = "snmp_version"
 
 # Netbox to Zabbix device state convertion
 zabbix_device_removal = ["Decommissioning", "Inventory"]
@@ -130,110 +131,6 @@ def connect_zabbix(config):
 
     return zabbix
 
-def main(arguments):
-    """Run the sync process.
-    """
-    # set environment variables
-    if arguments.verbose:
-        logger.warning("Setting log level to debug")
-        logger.setLevel(logging.DEBUG)
-
-    config = fetch_sync_config()
-
-    zabbix = connect_zabbix(config)
-
-    # Set Netbox API and fetch data
-    netbox = pynetbox.api(
-        url       = config["NETBOX_HOST"],
-        token     = config["NETBOX_TOKEN"],
-        threading = True,
-    )
-
-    # Fetch zabbix data
-    zabbix_templates = zabbix.template.get(output=['name'])
-    zabbix_proxys    = zabbix.proxy.get(output=['host'])
-
-    # Fetch netbox data
-    netbox_devices  = netbox.dcim.devices.all()
-    netbox_journals = netbox.extras.journal_entries
-
-    # Go through all Netbox devices
-    for nb_device in netbox_devices:
-        try:
-            # Ignore rules
-            if nb_device.device_role.slug in config['NETBOX_ROLE_IGNORE']:
-                logger.debug(f"Skipping host: {nb_device.name}")
-                continue
-
-            # Lets start dealing with the device
-            device = NetworkDevice(
-                nb_device,
-                zabbix,
-                netbox_journals,
-                arguments.journal
-            )
-            # Checks if device is part of cluster.
-            # Requires the cluster argument.
-            if device.is_cluster() and arguments.cluster:
-                # Check if device is master or slave
-                if device.promote_master_device():
-                    err_msg = f"Device {device.name} is part of " +\
-                        "cluster and primary."
-                    logger.info(err_msg)
-                else:
-                    # Device is secondary in cluster.
-                    # Don't continue with this device.
-                    err_msg = f"Device {device.name} is part of cluster " \
-                              f"but not primary. Skipping this host..."
-                    logger.info(err_msg)
-                    continue
-
-            # Checks if device is in cleanup state
-            if device.status in zabbix_device_removal:
-                if device.zabbix_id :
-                    # Delete device from Zabbix
-                    # and remove hostID from Netbox.
-                    device.cleanup()
-                    logger.info(f"Cleaned up host {device.name}.")
-
-                else:
-                    # Device has been added to Netbox
-                    # but is not in Activate state
-                    logger.info(
-                        f"Skipping host {device.name} since its "
-                        f"not in the active state."
-                    )
-                continue
-            elif device.status in zabbix_device_disable:
-                device.zabbix_state = 1
-
-            # Setup the host groups, wasteful for the time being
-            # to handle the creation of new groups, might just be best to
-            # query the groups I want for this host in the create hostgroups function
-            zabbix_groups    = zabbix.hostgroup.get(output=['name'])
-            zabbix_groups_map = {v['name']:v for v in zabbix_groups}
-            host_group_data = device.create_zabbix_hostgroups(zabbix_groups_map)
-
-            zabbix_groups    = zabbix.hostgroup.get(output=['groupid', 'name'])
-            zabbix_groups_map = {v['name']:v for v in zabbix_groups}
-
-            if device.zabbix_id: # Update Zabbix
-                device.consistency_check(
-                    zabbix_groups_map,
-                    zabbix_templates,
-                    zabbix_proxys,
-                    arguments.proxy_power,
-                )
-            else: # Add to Zabbix
-                device.create_in_zabbix(
-                    zabbix_groups,
-                    zabbix_groups_map,
-                    zabbix_templates,
-                    zabbix_proxys
-                )
-        except SyncError:
-            pass
-
 class NetworkDevice():
     """
     Represents Network device.
@@ -245,6 +142,8 @@ class NetworkDevice():
     })
 
     def __init__(self, nb_device, zabbix, nb_journal_class, journal=None):
+        '''NetworkDevice Constructor.
+        '''
         self.nb = nb_device
         self.id = nb_device.id
         self.name = NetworkDevice._clean_hostname(nb_device.name)
@@ -252,6 +151,7 @@ class NetworkDevice():
         self.zabbix = zabbix
         self.zabbix_id = None
         self.tenant = nb_device.tenant
+        self.snmp_version = "2c"
         self.template_id = None
         self.hostgroup = None # Should no longer be needed
         self.hostgroups = []
@@ -374,8 +274,7 @@ class NetworkDevice():
         return group_data
 
     def is_cluster(self):
-        """
-        Checks if device is part of cluster.
+        """Checks if device is part of cluster.
         """
         if self.nb.virtual_chassis:
             return True
@@ -411,9 +310,8 @@ class NetworkDevice():
             logger.debug(f"Device {self.name} is non-primary cluster member.")
             return False
 
-    def get_zabbix_template(self, templates):
-        """
-        Returns Zabbix template ID
+    def get_zabbix_template(self, templates) -> bool:
+        """Get Zabbix template ID.
         INPUT: list of templates
         OUTPUT: True
         """
@@ -876,6 +774,109 @@ class ZabbixInterface():
             "bulk": "1"
         }
 
+def main(arguments):
+    """Run the sync process.
+    """
+    # set environment variables
+    if arguments.verbose:
+        logger.warning("Setting log level to debug")
+        logger.setLevel(logging.DEBUG)
+
+    config = fetch_sync_config()
+
+    zabbix = connect_zabbix(config)
+
+    # Set Netbox API and fetch data
+    netbox = pynetbox.api(
+        url       = config["NETBOX_HOST"],
+        token     = config["NETBOX_TOKEN"],
+        threading = True,
+    )
+
+    # Fetch zabbix data
+    zabbix_templates = zabbix.template.get(output=['name'])
+    zabbix_proxys    = zabbix.proxy.get(output=['host'])
+
+    # Fetch netbox data
+    netbox_devices  = netbox.dcim.devices.all()
+    netbox_journals = netbox.extras.journal_entries
+
+    # Go through all Netbox devices
+    for nb_device in netbox_devices:
+        try:
+            # Ignore rules
+            if nb_device.device_role.slug in config['NETBOX_ROLE_IGNORE']:
+                logger.debug(f"Skipping host: {nb_device.name}")
+                continue
+
+            # Lets start dealing with the device
+            device = NetworkDevice(
+                nb_device,
+                zabbix,
+                netbox_journals,
+                arguments.journal
+            )
+            # Checks if device is part of cluster.
+            # Requires the cluster argument.
+            if device.is_cluster() and arguments.cluster:
+                # Check if device is master or slave
+                if device.promote_master_device():
+                    err_msg = f"Device {device.name} is part of " +\
+                        "cluster and primary."
+                    logger.info(err_msg)
+                else:
+                    # Device is secondary in cluster.
+                    # Don't continue with this device.
+                    err_msg = f"Device {device.name} is part of cluster " \
+                              f"but not primary. Skipping this host..."
+                    logger.info(err_msg)
+                    continue
+
+            # Checks if device is in cleanup state
+            if device.status in zabbix_device_removal:
+                if device.zabbix_id :
+                    # Delete device from Zabbix
+                    # and remove hostID from Netbox.
+                    device.cleanup()
+                    logger.info(f"Cleaned up host {device.name}.")
+
+                else:
+                    # Device has been added to Netbox
+                    # but is not in Activate state
+                    logger.info(
+                        f"Skipping host {device.name} since its "
+                        f"not in the active state."
+                    )
+                continue
+            elif device.status in zabbix_device_disable:
+                device.zabbix_state = 1
+
+            # Setup the host groups, wasteful for the time being
+            # to handle the creation of new groups, might just be best to
+            # query the groups I want for this host in the create hostgroups function
+            zabbix_groups    = zabbix.hostgroup.get(output=['name'])
+            zabbix_groups_map = {v['name']:v for v in zabbix_groups}
+            host_group_data = device.create_zabbix_hostgroups(zabbix_groups_map)
+
+            zabbix_groups    = zabbix.hostgroup.get(output=['groupid', 'name'])
+            zabbix_groups_map = {v['name']:v for v in zabbix_groups}
+
+            if device.zabbix_id: # Update Zabbix
+                device.consistency_check(
+                    zabbix_groups_map,
+                    zabbix_templates,
+                    zabbix_proxys,
+                    arguments.proxy_power,
+                )
+            else: # Add to Zabbix
+                device.create_in_zabbix(
+                    zabbix_groups,
+                    zabbix_groups_map,
+                    zabbix_templates,
+                    zabbix_proxys
+                )
+        except SyncError:
+            pass
 
 if __name__ == "__main__":
     # Arguments parsing
