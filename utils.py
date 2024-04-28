@@ -4,6 +4,10 @@ General utilities
 # System imports
 import argparse
 import functools
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 def rsetattr(obj, attr, val):
     '''Recursive setattr'''
