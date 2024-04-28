@@ -1,0 +1,4 @@
+Name,Content Types,Label,Group name,Type,Required,Description,ID,Default,Search weight,Filter logic,Visible,Editable,Is Cloneable,Display weight,Choice Set,Choices,Created,Last updated
+snmp_version,dcim.devicetype,SNMP Version,,Selection,False,,7,,1000,Loose,Always,Yes,True,100,SNMP Versions,"1, 2, 3",2024-04-28 19:34,2024-04-28 19:34
+zabbix_hostid,dcim.device,,,Integer,False,,1,,1000,Loose,Always,Yes,False,100,,,2022-10-26 02:17,2022-10-26 02:17
+zabbix_template,dcim.devicetype,,,Text,False,,2,,1000,Loose,Always,Yes,False,100,,,2022-10-26 02:18,2022-10-26 02:18
