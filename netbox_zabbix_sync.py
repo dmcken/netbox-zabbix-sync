@@ -19,65 +19,21 @@ import pynetbox
 import pyzabbix
 
 # Local imports
+from exceptions import *
 import utils
-
-# Setup logging
-log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-lgout = logging.StreamHandler()
-lgout.setFormatter(log_format)
-lgout.setLevel(logging.DEBUG)
-
-lgfile = logging.FileHandler(
-    os.path.join(
-        os.path.dirname(os.path.realpath(__file__)),
-        f"sync-{datetime.datetime.now().strftime('%Y-%m-%d')}.log",
-    )
-)
-lgfile.setFormatter(log_format)
-lgfile.setLevel(logging.DEBUG)
-
-logger = logging.getLogger("netbox-zabbix-sync")
-logger.addHandler(lgout)
-logger.addHandler(lgfile)
-logger.setLevel(logging.WARNING)
 
 # Set template and device Netbox "custom field" names
 TEMPLATE_CF = "zabbix_template"
-DEVICE_CF = "zabbix_hostid"
-SNMP_CF = "snmp_version"
+DEVICE_CF   = "zabbix_hostid"
+SNMP_CF     = "snmp_version"
 
 # Netbox to Zabbix device state convertion
 zabbix_device_removal = ["Decommissioning", "Inventory"]
 zabbix_device_disable = ["Offline", "Planned", "Staged", "Failed"]
 
-# Exceptions
-class SyncError(Exception):
-    '''Any errors when sync'ing a device'''
+logger = logging.getLogger(__name__)
 
-class SyncExternalError(SyncError):
-    '''An error from an external system'''
-    pass
-
-class SyncInventoryError(SyncError):
-    '''To determine'''
-    pass
-
-class SyncDuplicateError(SyncError):
-    '''A duplicate was found when attempting to sync'''
-    pass
-
-class EnvironmentVarError(SyncError):
-    '''To determine'''
-    pass
-
-class InterfaceConfigError(SyncError):
-    '''Error configuring the interface on zabbix'''
-    pass
-
-class ProxyConfigError(SyncError):
-    '''Error setting the proxy on zabbix.'''
-    pass
-
+# Main code starts here.
 def fetch_sync_config():
     '''Fetches config parameters for the netbox to zabbix sync.
 
@@ -325,8 +281,9 @@ class NetworkDevice():
         for template in templates:
             if template['name'] == self.template_name:
                 self.template_id = template['templateid']
-                e = (f"Found template ID {str(template['templateid'])} "
-                     f"for host {self.name}.")
+                e = (
+                    f"Found template ID {str(template['templateid'])} for "
+                    f"host {self.name}.")
                 logger.debug(e)
                 return True
         else:
@@ -338,8 +295,7 @@ class NetworkDevice():
             raise SyncInventoryError(err_msg)
 
     def get_zabbix_group(self, groups):
-        """
-        Returns Zabbix group ID
+        """Returns Zabbix group ID.
         INPUT: list of hostgroups
         OUTPUT: True / False
         """
@@ -347,7 +303,7 @@ class NetworkDevice():
         for group in groups:
             if group['name'] == self.hostgroup:
                 self.group_id = group['groupid']
-                e = (f"Found group {group['name']} for host {self.name}.")
+                e = f"Found group {group['name']} for host {self.name}."
                 logger.debug(e)
                 return True
         else:
@@ -399,9 +355,9 @@ class NetworkDevice():
             if interface.get_context():
                 # If device is SNMP type, add aditional information.
                 if interface.interface["type"] == 2:
-                    interface.set_snmp()
+                    interface.set_interface_snmp()
             else:
-                interface.set_default()
+                interface.set_snmp_default()
             return [interface.interface]
         except InterfaceConfigError as exc:
             exc = f"{self.name}: {exc}"
@@ -724,7 +680,7 @@ class ZabbixInterface():
         else:
             return False
 
-    def set_snmp(self):
+    def set_interface_snmp(self):
         '''
         Check if interface is type SNMP
         '''
@@ -763,7 +719,7 @@ class ZabbixInterface():
         else:
             raise InterfaceConfigError("Interface type is not SNMP, unable to set SNMP details")
 
-    def set_default(self):
+    def set_snmp_default(self):
         '''Set default config to SNMPv2,port 161 and community macro.'''
         self.interface = self.skelet
         self.interface["type"] = "2"
@@ -774,53 +730,34 @@ class ZabbixInterface():
             "bulk": "1"
         }
 
-def parse_args():
-    '''Parse CLI args and return the results.
+def setup_logging() -> None:
+    '''Setup logging.
     '''
-    # Arguments parsing
-    parser = argparse.ArgumentParser(
-        description='A script to sync Zabbix with Netbox device data.'
+    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    lgout = logging.StreamHandler()
+    lgout.setFormatter(log_format)
+    lgout.setLevel(logging.DEBUG)
+
+    lgfile = logging.FileHandler(
+        os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            f"sync-{datetime.datetime.now().strftime('%Y-%m-%d')}.log",
+        )
     )
-    parser.add_argument(
-        "-v", "--verbose",
-        help="Turn on debugging.",
-        action="store_true",
-    )
-    parser.add_argument(
-        "-c", "--cluster",
-        action="store_true",
-        help=(
-            "Only add the primary node of a cluster to Zabbix. Useful when a "
-            "shared virtual IP is used for the control plane."
-        ),
-    )
-    parser.add_argument(
-        "-t", "--tenant",
-        action="store_true",
-        help="Add Tenant name to the Zabbix hostgroup name scheme.",
-    )
-    parser.add_argument(
-        "-p", "--proxy_power",
-        action="store_true",
-        help=(
-            "USE WITH CAUTION. If there is a proxy configured in Zabbix but "
-            "not in Netbox, sync the device and remove the host - proxy "
-            "link in Zabbix."
-        ),
-    )
-    parser.add_argument(
-        "-j", "--journal",
-        action="store_true",
-        help="Create journal entries in Netbox at write actions"
-    )
-    return parser.parse_args()
+    lgfile.setFormatter(log_format)
+    lgfile.setLevel(logging.DEBUG)
+
+    logger.addHandler(lgout)
+    logger.addHandler(lgfile)
+    logger.setLevel(logging.WARNING)
 
 def main():
     """Run the sync process.
     """
+    setup_logging()
 
     # Get CLI args
-    arguments = parse_args()
+    arguments = utils.parse_args()
 
     # set environment variables
     if arguments.verbose:
