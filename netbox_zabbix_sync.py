@@ -1,13 +1,11 @@
 #!/usr/bin/python3
-"""
-Sync Netbox devices to Zabbix for monitoring.
+"""Sync Netbox devices to Zabbix for monitoring.
 
 
 
 """
 
 # System imports
-import argparse
 import datetime
 import logging
 import os
