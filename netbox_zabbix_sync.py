@@ -728,7 +728,7 @@ class ZabbixInterface():
             "bulk": "1"
         }
 
-def setup_logging() -> None:
+def setup_logging(arguments) -> None:
     '''Setup logging.
     '''
     log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -749,18 +749,18 @@ def setup_logging() -> None:
     logger.addHandler(lgfile)
     logger.setLevel(logging.WARNING)
 
-def main():
-    """Run the sync process.
-    """
-    setup_logging()
-
-    # Get CLI args
-    arguments = utils.parse_args()
-
-    # set environment variables
+    # Change log level based on CLI arguments
     if arguments.verbose:
         logger.warning("Setting log level to debug")
         logger.setLevel(logging.DEBUG)
+
+def main():
+    """Run the sync process.
+    """
+    # Get CLI args
+    arguments = utils.parse_args()
+
+    setup_logging(arguments)
 
     config = fetch_sync_config()
 
