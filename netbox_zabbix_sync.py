@@ -59,31 +59,7 @@ def fetch_sync_config():
 
     return config
 
-def connect_zabbix(config):
-    '''Connect to zabbix API.
 
-    Use token if present or username and password if not.
-
-    Fails if neither are present
-    '''
-    try:
-        connect_params = {}
-        if config['ZABBIX_TOKEN']:
-            connect_params['api_token'] = config['ZABBIX_TOKEN']
-        elif config['ZABBIX_USER'] and config['ZABBIX_PASS']:
-            connect_params['user']     = config['ZABBIX_USER']
-            connect_params['password'] = config['ZABBIX_PASS']
-        else:
-            raise EnvironmentVarError("ZABBIX_TOKEN or the combination of "
-                "ZABBIX_USER and ZABBIX_PASS must be defined")
-
-        zabbix = pyzabbix.ZabbixAPI(config["ZABBIX_HOST"])
-        zabbix.login(**connect_params)
-    except pyzabbix.ZabbixAPIException as exc:
-        exc_msg = f"Zabbix returned the following error: {str(exc)}."
-        logger.error(exc_msg)
-
-    return zabbix
 
 class NetworkDevice():
     """
@@ -764,7 +740,7 @@ def main():
 
     config = fetch_sync_config()
 
-    zabbix = connect_zabbix(config)
+    zabbix = utils.connect_zabbix(config)
 
     # Set Netbox API and fetch data
     netbox = pynetbox.api(

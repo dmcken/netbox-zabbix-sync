@@ -6,6 +6,11 @@ import argparse
 import functools
 import logging
 
+# External imports
+import pyzabbix
+
+# Local imports
+from exceptions import *
 
 logger = logging.getLogger(__name__)
 
@@ -63,3 +68,29 @@ def parse_args():
         help="Create journal entries in Netbox at write actions"
     )
     return parser.parse_args()
+
+def connect_zabbix(config):
+    '''Connect to zabbix API.
+
+    Use token if present or username and password if not.
+
+    Fails if neither are present
+    '''
+    try:
+        connect_params = {}
+        if config['ZABBIX_TOKEN']:
+            connect_params['api_token'] = config['ZABBIX_TOKEN']
+        elif config['ZABBIX_USER'] and config['ZABBIX_PASS']:
+            connect_params['user']     = config['ZABBIX_USER']
+            connect_params['password'] = config['ZABBIX_PASS']
+        else:
+            raise EnvironmentVarError("ZABBIX_TOKEN or the combination of "
+                "ZABBIX_USER and ZABBIX_PASS must be defined")
+
+        zabbix = pyzabbix.ZabbixAPI(config["ZABBIX_HOST"])
+        zabbix.login(**connect_params)
+    except pyzabbix.ZabbixAPIException as exc:
+        exc_msg = f"Zabbix returned the following error: {str(exc)}."
+        logger.error(exc_msg)
+
+    return zabbix
