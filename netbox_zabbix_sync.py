@@ -724,7 +724,7 @@ def main():
 
     # Fetch zabbix data
     zabbix_templates = zabbix.template.get(output=['name'])
-    zabbix_proxys    = zabbix.proxy.get(output=['host'])
+    zabbix_proxies   = zabbix.proxy.get(output=['host'])
 
     # Fetch netbox data
     netbox_devices  = netbox.dcim.devices.all()
@@ -794,7 +794,7 @@ def main():
                 device.consistency_check(
                     zabbix_groups_map,
                     zabbix_templates,
-                    zabbix_proxys,
+                    zabbix_proxies,
                     arguments.proxy_power,
                 )
             else: # Add to Zabbix
@@ -802,7 +802,7 @@ def main():
                     zabbix_groups,
                     zabbix_groups_map,
                     zabbix_templates,
-                    zabbix_proxys
+                    zabbix_proxies
                 )
         except SyncError:
             pass
