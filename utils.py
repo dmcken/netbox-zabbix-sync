@@ -5,8 +5,10 @@ General utilities
 import argparse
 import functools
 import logging
+import os
 
 # External imports
+import dotenv
 import pyzabbix
 
 # Local imports
@@ -94,3 +96,30 @@ def connect_zabbix(config):
         logger.error(exc_msg)
 
     return zabbix
+
+def fetch_sync_config():
+    '''Fetches config parameters for the netbox to zabbix sync.
+
+    Checks for missing environment variable first
+    '''
+    dotenv.load_dotenv()
+
+    config = {}
+    env_vars = [
+        "ZABBIX_HOST",
+        "ZABBIX_USER",
+        "ZABBIX_PASS",
+        "ZABBIX_TOKEN",
+        "NETBOX_HOST",
+        "NETBOX_TOKEN",
+        "NETBOX_ROLE_IGNORE",
+    ]
+    for var in env_vars:
+        config[var] = os.environ.get(var, None)
+
+    # Parse the config entries that require it.
+    if config["NETBOX_ROLE_IGNORE"] is not None:
+        parts = config["NETBOX_ROLE_IGNORE"].split(',')
+        config["NETBOX_ROLE_IGNORE"] = parts
+
+    return config

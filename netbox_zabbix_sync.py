@@ -12,7 +12,6 @@ import os
 import pprint
 
 # External imports
-import dotenv
 import pynetbox
 import pyzabbix
 
@@ -32,38 +31,9 @@ zabbix_device_disable = ["Offline", "Planned", "Staged", "Failed"]
 logger = logging.getLogger(__name__)
 
 # Main code starts here.
-def fetch_sync_config():
-    '''Fetches config parameters for the netbox to zabbix sync.
-
-    Checks for missing environment variable first
-    '''
-    dotenv.load_dotenv()
-
-    config = {}
-    env_vars = [
-        "ZABBIX_HOST",
-        "ZABBIX_USER",
-        "ZABBIX_PASS",
-        "ZABBIX_TOKEN",
-        "NETBOX_HOST",
-        "NETBOX_TOKEN",
-        "NETBOX_ROLE_IGNORE",
-    ]
-    for var in env_vars:
-        config[var] = os.environ.get(var, None)
-
-    # Parse the config entries that require it.
-    if config["NETBOX_ROLE_IGNORE"] is not None:
-        parts = config["NETBOX_ROLE_IGNORE"].split(',')
-        config["NETBOX_ROLE_IGNORE"] = parts
-
-    return config
-
-
 
 class NetworkDevice():
-    """
-    Represents Network device.
+    """Represents a Network device.
     INPUT: (Netbox device class, ZabbixAPI class, journal flag, NB journal class)
     """
 
@@ -694,7 +664,8 @@ class ZabbixInterface():
             raise InterfaceConfigError("Interface type is not SNMP, unable to set SNMP details")
 
     def set_snmp_default(self):
-        '''Set default config to SNMPv2,port 161 and community macro.'''
+        '''Set default config to SNMPv2,port 161 and community macro.
+        '''
         self.interface = self.skelet
         self.interface["type"] = "2"
         self.interface["port"] = "161"
@@ -706,6 +677,8 @@ class ZabbixInterface():
 
 def setup_logging(arguments) -> None:
     '''Setup logging.
+
+    I want to move this to utils but it needs to be able to modify the global logger.
     '''
     log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     lgout = logging.StreamHandler()
@@ -738,7 +711,7 @@ def main():
 
     setup_logging(arguments)
 
-    config = fetch_sync_config()
+    config = utils.fetch_sync_config()
 
     zabbix = utils.connect_zabbix(config)
 
