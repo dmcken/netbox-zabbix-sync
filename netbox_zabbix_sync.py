@@ -16,7 +16,7 @@ import pynetbox
 import pyzabbix
 
 # Local imports
-from exceptions import *
+from exceptions import InterfaceConfigError,SyncError,SyncExternalError,SyncInventoryError
 import utils
 
 # Set template and device Netbox "custom field" names
@@ -60,7 +60,7 @@ class NetworkDevice():
         self.hg_format = [ # Should no longer be needed
             self.nb.site.name,
             self.nb.device_type.manufacturer.name,
-            self.nb.device_role.name
+            self.nb.role.name
         ]
         self.journal = journal
         self.nb_journals = nb_journal_class
@@ -230,13 +230,13 @@ class NetworkDevice():
                     f"host {self.name}.")
                 logger.debug(e)
                 return True
-        else:
-            err_msg = (
-                f"Unable to find template {self.template_name} "
-                f"for host {self.name} in Zabbix."
-            )
-            logger.warning(err_msg)
-            raise SyncInventoryError(err_msg)
+        # No match was found.
+        err_msg = (
+            f"Unable to find template {self.template_name} "
+            f"for host {self.name} in Zabbix."
+        )
+        logger.warning(err_msg)
+        raise SyncInventoryError(err_msg)
 
     def get_zabbix_group(self, groups):
         """Returns Zabbix group ID.
@@ -250,13 +250,13 @@ class NetworkDevice():
                 e = f"Found group {group['name']} for host {self.name}."
                 logger.debug(e)
                 return True
-        else:
-            err_msg = (
-                f"Unable to find group '{self.hostgroup}' "
-                f"for host {self.name} in Zabbix."
-            )
-            logger.warning(err_msg)
-            raise SyncInventoryError(err_msg)
+        # No match found
+        err_msg = (
+            f"Unable to find group '{self.hostgroup}' "
+            f"for host {self.name} in Zabbix."
+        )
+        logger.warning(err_msg)
+        raise SyncInventoryError(err_msg)
 
     def cleanup(self):
         """
@@ -322,10 +322,10 @@ class NetworkDevice():
                         logger.debug(f"Found proxy {proxy}"
                                      f" for {self.name}.")
                         return True
-                else:
-                    err_msg = f"{self.name}: Defined proxy {proxy} not found."
-                    logger.warning(err_msg)
-                    return False
+                # No match found
+                err_msg = f"{self.name}: Defined proxy {proxy} not found."
+                logger.warning(err_msg)
+                return False
 
     def create_in_zabbix(self, groups, zabbix_groups_map, templates, proxys,
                        description="Host added by Netbox sync script."):
@@ -734,7 +734,7 @@ def main():
     for nb_device in netbox_devices:
         try:
             # Ignore rules
-            if nb_device.device_role.slug in config['NETBOX_ROLE_IGNORE']:
+            if nb_device.role.slug in config['NETBOX_ROLE_IGNORE']:
                 logger.debug(f"Skipping host: {nb_device.name}")
                 continue
 
