@@ -36,9 +36,9 @@ Now a custom tag of "ZabbixGroup#Hello" will proceed to create the group "Hello"
 
 ## Netbox device status
 By setting a status on a Netbox device you determine how the host is added (or updated) in Zabbix. There are, by default, 3 options:
-* Delete the host from Zabbix (triggered by Netbox status "Decommissioning" and "Inventory")
-* Create the host in Zabbix but with a disabled status (Trigger by "Offline", "Planned", "Staged" and "Failed")
 * Create the host in Zabbix with an enabled status (For now only enabled with the "Active" status)
+* Create or update the host in Zabbix but with a disabled status (Trigger by "Failed", "Offline", "Planned" or "Staged")
+* Delete the host from Zabbix (triggered by Netbox status "Decommissioning" or "Inventory")
 
 You can modify this behaviour by changing the following list variables in the script:
  - zabbix_device_removal
