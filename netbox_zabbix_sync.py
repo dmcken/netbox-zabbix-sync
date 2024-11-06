@@ -496,7 +496,7 @@ class NetworkDevice():
                 logger.warning(f"Device {self.name}: proxy OUT of sync.")
                 self.update_zabbix_host(proxy_hostid=self.zbxproxy)
         else:
-            if not host["proxy_hostid"] == "0":
+            if not host["proxyid"] == "0":
                 if proxy_power:
                     # If the -p flag has been issued,
                     # delete the proxy link in Zabbix
@@ -724,7 +724,7 @@ def main():
 
     # Fetch zabbix data
     zabbix_templates = zabbix.template.get(output=['name'])
-    zabbix_proxies   = zabbix.proxy.get(output=['host'])
+    zabbix_proxies   = zabbix.proxy.get(output=['name','proxyid'])
 
     # Fetch netbox data
     netbox_devices  = netbox.dcim.devices.all()
