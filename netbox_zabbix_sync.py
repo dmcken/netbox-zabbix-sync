@@ -16,8 +16,7 @@ import pynetbox
 import pyzabbix
 
 # Local imports
-from exceptions import InterfaceConfigError,SyncError,SyncExternalError,SyncInventoryError
-import utils
+from . import exceptions, utils
 
 # Set template and device Netbox "custom field" names
 TEMPLATE_CF = "zabbix_template"
@@ -62,6 +61,7 @@ class NetworkDevice():
             self.nb.device_type.manufacturer.name,
             self.nb.role.name
         ]
+        self.group_id = None
         self.journal = journal
         self.nb_journals = nb_journal_class
         self._set_basics()
@@ -92,7 +92,7 @@ class NetworkDevice():
         else:
             e = f"Device {self.name}: no primary IP."
             logger.warning(e)
-            raise SyncInventoryError(e)
+            raise exceptions.SyncInventoryError(e)
 
         # Check if device_type has custom field
         device_type_cf = self.nb.device_type.custom_fields
@@ -102,7 +102,7 @@ class NetworkDevice():
             e = (f"Custom field {TEMPLATE_CF} not "
                  f"found for {self.nb.device_type.name}.")
             logger.warning(e)
-            raise SyncInventoryError(e)
+            raise exceptions.SyncInventoryError(e)
 
         # Check if device has custom field
         if DEVICE_CF in self.nb.custom_fields:
@@ -110,7 +110,7 @@ class NetworkDevice():
         else:
             e = f"Custom field {TEMPLATE_CF} not found for {self.name}."
             logger.warning(e)
-            raise SyncInventoryError(e)
+            raise exceptions.SyncInventoryError(e)
 
     def set_hostgroup(self):
         """Sets hostgroup to a string with hg_format parameters.
@@ -169,7 +169,7 @@ class NetworkDevice():
             except pyzabbix.ZabbixAPIException as exc:
                 exc_msg = f"Couldn't add hostgroup {curr_hostgroup}, Zabbix returned {str(exc)}."
                 logger.error(exc_msg)
-                raise SyncExternalError(exc_msg) from exc
+                raise exceptions.SyncExternalError(exc_msg) from exc
 
         return group_data
 
@@ -188,7 +188,7 @@ class NetworkDevice():
         if not self.is_cluster():
             e = f"Unable to proces {self.name} for cluster calculation: not part of a cluster."
             logger.warning(e)
-            raise SyncInventoryError(e)
+            raise exceptions.SyncInventoryError(e)
         else:
             return self.nb.virtual_chassis.master.id
 
@@ -221,7 +221,7 @@ class NetworkDevice():
                 "has no Zabbix template defined."
             )
             logger.error(e)
-            raise SyncInventoryError()
+            raise exceptions.SyncInventoryError()
         for template in templates:
             if template['name'] == self.template_name:
                 self.template_id = template['templateid']
@@ -236,7 +236,7 @@ class NetworkDevice():
             f"for host {self.name} in Zabbix."
         )
         logger.warning(err_msg)
-        raise SyncInventoryError(err_msg)
+        raise exceptions.SyncInventoryError(err_msg)
 
     def get_zabbix_group(self, groups):
         """Returns Zabbix group ID.
@@ -256,7 +256,7 @@ class NetworkDevice():
             f"for host {self.name} in Zabbix."
         )
         logger.warning(err_msg)
-        raise SyncInventoryError(err_msg)
+        raise exceptions.SyncInventoryError(err_msg)
 
     def cleanup(self):
         """
@@ -274,7 +274,7 @@ class NetworkDevice():
             except pyzabbix.ZabbixAPIException as exc:
                 err_msg = f"Zabbix returned the following error: {str(exc)}."
                 logger.error(err_msg)
-                raise SyncExternalError(err_msg) from exc
+                raise exceptions.SyncExternalError(err_msg) from exc
 
     def _zabbix_hostname_exists(self):
         """
@@ -303,10 +303,10 @@ class NetworkDevice():
             else:
                 interface.set_snmp_default()
             return [interface.interface]
-        except InterfaceConfigError as exc:
+        except exceptions.InterfaceConfigError as exc:
             exc = f"{self.name}: {exc}"
             logger.warning(exc)
-            raise SyncInventoryError(exc) from None
+            raise exceptions.SyncInventoryError(exc) from None
 
     def set_proxy(self, proxy_list):
         '''
@@ -370,7 +370,7 @@ class NetworkDevice():
             except pyzabbix.ZabbixAPIException as exc:
                 err_msg = f"Couldn't add {self.name}, Zabbix returned {str(exc)}."
                 logger.error(err_msg)
-                raise SyncExternalError(err_msg) from exc
+                raise exceptions.SyncExternalError(err_msg) from exc
             # Set Netbox custom field to hostID value.
             self.nb.custom_fields[DEVICE_CF] = int(self.zabbix_id)
             self.nb.save()
@@ -392,7 +392,7 @@ class NetworkDevice():
         except pyzabbix.ZabbixAPIException as exc:
             err_msg = f"Couldn't add hostgroup, Zabbix returned {str(exc)}."
             logger.error(err_msg)
-            raise SyncExternalError(err_msg) from exc
+            raise exceptions.SyncExternalError(err_msg) from exc
 
     def update_zabbix_host(self, **kwargs):
         """
@@ -404,7 +404,7 @@ class NetworkDevice():
         except pyzabbix.ZabbixAPIException as exc:
             err_msg = f"Zabbix returned the following error: {str(exc)}."
             logger.error(err_msg)
-            raise SyncExternalError(err_msg) from exc
+            raise exceptions.SyncExternalError(err_msg) from exc
         logger.info(f"Updated host {self.name} with data {kwargs}.")
         self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
 
@@ -434,7 +434,7 @@ class NetworkDevice():
                 f"with ID {self.zabbix_id} - hostname {self.name}."
             )
             logger.error(err_msg)
-            raise SyncInventoryError(err_msg)
+            raise exceptions.SyncInventoryError(err_msg)
         elif len(host) == 0:
             e = (
                 f"No Zabbix host found for {self.name}. "
@@ -442,7 +442,7 @@ class NetworkDevice():
                 f"without zeroing the ID field in Netbox."
             )
             logger.error(e)
-            raise SyncInventoryError(e)
+            raise exceptions.SyncInventoryError(e)
         else:
             host = host[0]
 
@@ -549,7 +549,7 @@ class NetworkDevice():
                     e = (f"Device {self.name}: changing interface type to "
                          f"{str(updates['type'])} is not supported.")
                     logger.error(e)
-                    raise InterfaceConfigError(e)
+                    raise exceptions.InterfaceConfigError(e)
                 # Set interfaceID for Zabbix config
                 updates["interfaceid"] = host["interfaces"][0]['interfaceid']
                 try:
@@ -561,7 +561,7 @@ class NetworkDevice():
                 except pyzabbix.ZabbixAPIException as exc:
                     err_msg = f"Zabbix returned the following error: {str(exc)}."
                     logger.error(err_msg)
-                    raise SyncExternalError(err_msg) from exc
+                    raise exceptions.SyncExternalError(err_msg) from exc
             else:
                 # If no updates are found, Zabbix interface is in-sync
                 debug_msg = f"Device {self.name}: interface in-sync."
@@ -573,7 +573,7 @@ class NetworkDevice():
                 "Manual interfention required."
             )
             logger.error(err_msg)
-            raise SyncInventoryError(err_msg)
+            raise exceptions.SyncInventoryError(err_msg)
 
     def create_journal_entry(self, severity, message):
         '''
@@ -656,12 +656,18 @@ class ZabbixInterface():
                         if key in items:
                             self.interface["details"][key] = str(item)
                 else:
-                    raise InterfaceConfigError('Unsupported SNMP version '
-                        f'{self.interface["details"]["version"]}')
+                    raise exceptions.InterfaceConfigError(
+                        'Unsupported SNMP version '
+                        f'{self.interface["details"]["version"]}'
+                    )
             else:
-                raise InterfaceConfigError("Interface type SNMP but no parameters provided.")
+                raise exceptions.InterfaceConfigError(
+                    "Interface type SNMP but no parameters provided."
+                )
         else:
-            raise InterfaceConfigError("Interface type is not SNMP, unable to set SNMP details")
+            raise exceptions.InterfaceConfigError(
+                "Interface type is not SNMP, unable to set SNMP details"
+            )
 
     def set_snmp_default(self):
         '''Set default config to SNMPv2,port 161 and community macro.
@@ -804,7 +810,7 @@ def main():
                     zabbix_templates,
                     zabbix_proxies
                 )
-        except SyncError:
+        except exceptions.SyncError:
             pass
     logger.info("Done")
 
