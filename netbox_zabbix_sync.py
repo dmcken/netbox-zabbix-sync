@@ -16,7 +16,8 @@ import pynetbox
 import pyzabbix
 
 # Local imports
-from . import exceptions, utils
+import exceptions
+import utils
 
 # Set template and device Netbox "custom field" names
 TEMPLATE_CF = "zabbix_template"
