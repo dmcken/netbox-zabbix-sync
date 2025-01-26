@@ -7,6 +7,7 @@ import datetime
 import functools
 import logging
 import os
+import sys
 
 # External imports
 import dotenv
@@ -74,12 +75,13 @@ def parse_args():
     return parser.parse_args()
 
 def setup_logging(caller_logger, arguments, file_prefix) -> None:
-    '''Setup logging.
+    '''Setup logging for application.
 
-    I want to move this to utils but it needs to be able to modify the global logger.
     '''
-    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    lgout = logging.StreamHandler()
+    log_format = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    lgout = logging.StreamHandler(stream=sys.stdout)
     lgout.setFormatter(log_format)
     lgout.setLevel(logging.DEBUG)
 
