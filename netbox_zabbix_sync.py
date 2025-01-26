@@ -20,9 +20,11 @@ import exceptions
 import utils
 
 # Set template and device Netbox "custom field" names
-TEMPLATE_CF = "zabbix_template"
-DEVICE_CF   = "zabbix_hostid"
-SNMP_CF     = "snmp_version"
+CF = {
+    'TEMPLATE' : "zabbix_template",
+    'HOSTID'   : "zabbix_hostid",
+    'SNMP_VER' : "snmp_version",
+}
 
 # Netbox to Zabbix device state convertion
 zabbix_device_removal = ["Decommissioning", "Inventory"]
@@ -51,7 +53,7 @@ class NetworkDevice():
         self.zabbix = zabbix
         self.zabbix_id = None
         self.tenant = nb_device.tenant
-        self.snmp_version = "2c"
+        self.snmp_version = "2c" # Can be overridden by custom field.
         self.template_id = None
         self.hostgroup = None # Should no longer be needed
         self.hostgroups = []
@@ -97,19 +99,19 @@ class NetworkDevice():
 
         # Check if device_type has custom field
         device_type_cf = self.nb.device_type.custom_fields
-        if TEMPLATE_CF in device_type_cf:
-            self.template_name = device_type_cf[TEMPLATE_CF]
+        if CF['TEMPLATE'] in device_type_cf:
+            self.template_name = device_type_cf[CF['TEMPLATE']]
         else:
-            e = (f"Custom field {TEMPLATE_CF} not "
+            e = (f"Custom field {CF['TEMPLATE']} not "
                  f"found for {self.nb.device_type.name}.")
             logger.warning(e)
             raise exceptions.SyncInventoryError(e)
 
         # Check if device has custom field
-        if DEVICE_CF in self.nb.custom_fields:
-            self.zabbix_id = self.nb.custom_fields[DEVICE_CF]
+        if CF['HOSTID'] in self.nb.custom_fields:
+            self.zabbix_id = self.nb.custom_fields[CF['HOSTID']]
         else:
-            e = f"Custom field {TEMPLATE_CF} not found for {self.name}."
+            e = f"Custom field {CF['TEMPLATE']} not found for {self.name}."
             logger.warning(e)
             raise exceptions.SyncInventoryError(e)
 
@@ -267,7 +269,7 @@ class NetworkDevice():
         if self.zabbix_id:
             try:
                 self.zabbix.host.delete(self.zabbix_id)
-                self.nb.custom_fields[DEVICE_CF] = None
+                self.nb.custom_fields[CF['HOSTID']] = None
                 self.nb.save()
                 e = f"Deleted host {self.name} from Zabbix."
                 logger.info(e)
@@ -373,7 +375,7 @@ class NetworkDevice():
                 logger.error(err_msg)
                 raise exceptions.SyncExternalError(err_msg) from exc
             # Set Netbox custom field to hostID value.
-            self.nb.custom_fields[DEVICE_CF] = int(self.zabbix_id)
+            self.nb.custom_fields[CF['HOSTID']] = int(self.zabbix_id)
             self.nb.save()
             msg = f"Created host {self.name} in Zabbix."
             logger.info(msg)
