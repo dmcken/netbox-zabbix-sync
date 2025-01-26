@@ -73,7 +73,7 @@ def parse_args():
     )
     return parser.parse_args()
 
-def setup_logging(caller_logger, arguments) -> None:
+def setup_logging(caller_logger, arguments, file_prefix) -> None:
     '''Setup logging.
 
     I want to move this to utils but it needs to be able to modify the global logger.
@@ -86,7 +86,7 @@ def setup_logging(caller_logger, arguments) -> None:
     lgfile = logging.FileHandler(
         os.path.join(
             os.path.dirname(os.path.realpath(__file__)),
-            f"sync-{datetime.datetime.now().strftime('%Y-%m-%d')}.log",
+            f"{file_prefix}-{datetime.datetime.now().strftime('%Y-%m-%d')}.log",
         )
     )
     lgfile.setFormatter(log_format)
