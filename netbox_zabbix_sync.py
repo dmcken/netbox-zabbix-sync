@@ -86,7 +86,7 @@ class NetworkDevice():
         if nb_device.name is None:
             return str(nb_device).translate(NetworkDevice._host_translations)
         else:
-            return nb_name.translate(NetworkDevice._host_translations)
+            return nb_device.name.translate(NetworkDevice._host_translations)
 
     def _set_basics(self):
         """
