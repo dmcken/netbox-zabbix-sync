@@ -9,6 +9,7 @@ import os
 
 # External imports
 import dotenv
+import pynetbox
 import pyzabbix
 
 # Local imports
