@@ -466,12 +466,12 @@ class NetworkDevice():
             logger.warning(f"Device {self.name}: template OUT of sync.")
             self.update_zabbix_host(templates=self.template_id)
 
-        # Sync the host groups
+        # Sync the hostgroups
         n_host_group_ids = []
         for curr_group in self.hostgroups:
             n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
         n_host_group_ids = sorted(map(lambda x: int(x), n_host_group_ids))
-        z_host_group_ids = sorted(map(lambda x: int(x['groupid']), host['groups']))
+        z_host_group_ids = sorted(map(lambda x: int(x['groupid']), host['hostgroups']))
 
         logger.debug(f"Groups z: {z_host_group_ids} - n: {n_host_group_ids}")
 
