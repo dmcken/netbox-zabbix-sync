@@ -48,7 +48,11 @@ class NetworkDevice():
         '''
         self.nb = nb_device
         self.id = nb_device.id
-        self.name = NetworkDevice._clean_hostname(nb_device.name)
+        try:
+            self.name = NetworkDevice._clean_hostname(nb_device.name)
+        except AttributeError as exc:
+            logger.error(f"Error {exc} cleaning name for: {nb_device}")
+            raise
         self.status = nb_device.status.label
         self.zabbix = zabbix
         self.zabbix_id = None
