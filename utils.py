@@ -71,6 +71,16 @@ def parse_args():
     )
     return parser.parse_args()
 
+def connect_netbox(config: dict):
+
+    netbox = pynetbox.api(
+        url       = config["NETBOX_HOST"],
+        token     = config["NETBOX_TOKEN"],
+        threading = True,
+    )
+    return netbox
+
+
 def connect_zabbix(config):
     '''Connect to zabbix API.
 
