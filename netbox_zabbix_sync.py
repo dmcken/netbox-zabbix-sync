@@ -682,41 +682,13 @@ class ZabbixInterface():
             "bulk": "1"
         }
 
-def setup_logging(arguments) -> None:
-    '''Setup logging.
-
-    I want to move this to utils but it needs to be able to modify the global logger.
-    '''
-    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    lgout = logging.StreamHandler()
-    lgout.setFormatter(log_format)
-    lgout.setLevel(logging.DEBUG)
-
-    lgfile = logging.FileHandler(
-        os.path.join(
-            os.path.dirname(os.path.realpath(__file__)),
-            f"sync-{datetime.datetime.now().strftime('%Y-%m-%d')}.log",
-        )
-    )
-    lgfile.setFormatter(log_format)
-    lgfile.setLevel(logging.DEBUG)
-
-    logger.addHandler(lgout)
-    logger.addHandler(lgfile)
-    logger.setLevel(logging.WARNING)
-
-    # Change log level based on CLI arguments
-    if arguments.verbose:
-        logger.warning("Setting log level to debug")
-        logger.setLevel(logging.DEBUG)
-
 def main():
     """Run the sync process.
     """
     # Get CLI args
     arguments = utils.parse_args()
 
-    setup_logging(arguments)
+    utils.setup_logging(logger, arguments,'sync')
 
     config = utils.fetch_sync_config()
 
