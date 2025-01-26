@@ -428,7 +428,7 @@ class NetworkDevice():
                 'details',
                 'interfaceid',
             ],
-            selectGroups=["groupid"],
+            selectHostGroups=["groupid"],
             selectParentTemplates=["templateid"],
         )
         if len(host) > 1:
