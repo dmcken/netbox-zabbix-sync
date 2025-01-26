@@ -1,7 +1,9 @@
 # General
 A script to sync the Netbox device inventory to Zabbix.
 
-Only compatible with Netbox 3+
+Compatible with:
+* Netbox 3+
+* Zabbix 7+
 
 # Script settings
 
@@ -29,8 +31,8 @@ Groups are created and the hosts automatically populated based on the following 
 | Rack | Rack - [Rack Name] | |
 | Site | Site - [Site Name] | |
 | Role | Role - [Device Role] | |
-| Tenant | Tenant - [Tenant Name] | | 
- 
+| Tenant | Tenant - [Tenant Name] | |
+
 ### Custom groups:
 Now a custom tag of "ZabbixGroup#Hello" will proceed to create the group "Hello" if it doesn't exist and place the device inside of that group.
 
