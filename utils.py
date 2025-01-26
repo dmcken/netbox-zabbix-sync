@@ -165,3 +165,14 @@ def fetch_sync_config():
         config["NETBOX_ROLE_IGNORE"] = parts
 
     return config
+
+def parse_tags(tags_list: list[dict]) -> dict:
+    """Parse zabbix tags to a dictionary.
+
+    Args:
+        tags_list (list[dict]): _description_
+
+    Returns:
+        dict: _description_
+    """
+    return {tag['tag']:tag['value'] for tag in tags_list}
