@@ -48,11 +48,7 @@ class NetworkDevice():
         '''
         self.nb = nb_device
         self.id = nb_device.id
-        try:
-            self.name = NetworkDevice._clean_hostname(nb_device.name)
-        except AttributeError as exc:
-            logger.error(f"Error {exc} cleaning name for: {nb_device}")
-            raise
+        self.name = NetworkDevice._clean_hostname(nb_device)
         self.status = nb_device.status.label
         self.zabbix = zabbix
         self.zabbix_id = None
@@ -78,7 +74,7 @@ class NetworkDevice():
         logger.info(f"Host groups: {pprint.pformat(self.hostgroups)}")
 
     @staticmethod
-    def _clean_hostname(nb_name: str) -> str:
+    def _clean_hostname(nb_device) -> str:
         '''Returns a cleaned name that Zabbix will accept.
 
         Per:
@@ -86,7 +82,11 @@ class NetworkDevice():
 
         Alphanumerics, spaces, dots, dashes and underscores are allowed
         '''
-        return nb_name.translate(NetworkDevice._host_translations)
+        # The name may not always be set.
+        if nb_device.name is None:
+            return str(nb_device).translate(NetworkDevice._host_translations)
+        else:
+            return nb_name.translate(NetworkDevice._host_translations)
 
     def _set_basics(self):
         """
