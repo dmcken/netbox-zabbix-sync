@@ -72,6 +72,34 @@ def parse_args():
     )
     return parser.parse_args()
 
+def setup_logging(caller_logger, arguments) -> None:
+    '''Setup logging.
+
+    I want to move this to utils but it needs to be able to modify the global logger.
+    '''
+    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    lgout = logging.StreamHandler()
+    lgout.setFormatter(log_format)
+    lgout.setLevel(logging.DEBUG)
+
+    lgfile = logging.FileHandler(
+        os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            f"sync-{datetime.datetime.now().strftime('%Y-%m-%d')}.log",
+        )
+    )
+    lgfile.setFormatter(log_format)
+    lgfile.setLevel(logging.DEBUG)
+
+    caller_logger.addHandler(lgout)
+    caller_logger.addHandler(lgfile)
+    caller_logger.setLevel(logging.WARNING)
+
+    # Change log level based on CLI arguments
+    if arguments.verbose:
+        caller_logger.warning("Setting log level to debug")
+        caller_logger.setLevel(logging.DEBUG)
+
 def connect_netbox(config: dict):
 
     netbox = pynetbox.api(
