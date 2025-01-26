@@ -720,14 +720,9 @@ def main():
 
     config = utils.fetch_sync_config()
 
+    # Connect to netbox & zabbix
     zabbix = utils.connect_zabbix(config)
-
-    # Set Netbox API and fetch data
-    netbox = pynetbox.api(
-        url       = config["NETBOX_HOST"],
-        token     = config["NETBOX_TOKEN"],
-        threading = True,
-    )
+    netbox = utils.connect_netbox(config)
 
     # Fetch zabbix data
     zabbix_templates = zabbix.template.get(output=['name'])
