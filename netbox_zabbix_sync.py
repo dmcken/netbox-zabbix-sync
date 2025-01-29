@@ -300,15 +300,7 @@ class NetworkDevice():
         """
         try:
             # Initiate interface class
-            interface = ZabbixInterface(self.nb.config_context, self.ip)
-            # Check if Netbox has device context.
-            # If not fall back to old config.
-            if interface.get_context():
-                # If device is SNMP type, add aditional information.
-                if interface.interface["type"] == 2:
-                    interface.set_interface_snmp()
-            else:
-                interface.set_snmp_default()
+            interface = ZabbixInterface(self.nb, self.ip)
             return [interface.interface]
         except exceptions.InterfaceConfigError as exc:
             exc = f"{self.name}: {exc}"
@@ -609,14 +601,30 @@ class NetworkDevice():
                 )
 
 
-class ZabbixInterface():
-    """Class that represents a Zabbix interface."""
+class ZabbixInterface:
+    """Class that represents a Zabbix interface"""
 
-    def __init__(self, context, ip):
-        self.context = context
+    def __init__(self, device, ip: str):
+        """Zabbix interface constructor.
+
+        Args:
+            device (_type_): Netbox device object.
+            ip (str): _description_
+        """
+        self.device = device
+        self.context = device.config_context
         self.ip = ip
         self.skelet = {"main": "1", "useip": "1", "dns": "", "ip": self.ip}
         self.interface = self.skelet
+
+        # Check if Netbox has device context.
+        # If not fall back to default config.
+        if self.get_context():
+            # If device is SNMP type, add aditional information.
+            if self.interface["type"] == 2:
+                self.set_interface_snmp()
+        else:
+            self.set_snmp_default()
 
     def get_context(self):
         '''Check if Netbox custom context has been defined.
@@ -675,7 +683,7 @@ class ZabbixInterface():
             )
 
     def set_snmp_default(self):
-        '''Set default config to SNMPv2,port 161 and community macro.
+        '''Set SNMP defaults based on the device type.
         '''
         self.interface = self.skelet
         self.interface["type"] = "2"
@@ -685,6 +693,11 @@ class ZabbixInterface():
             "community": "{$SNMP_COMMUNITY}",
             "bulk": "1"
         }
+        # Pull in data from the device_type
+        if self.device.device_type.custom_fields['snmp_version'] is not None:
+            self.interface["details"]["version"] = self.device.device_type.\
+                custom_fields['snmp_version']
+
 
 def main():
     """Run the sync process.
