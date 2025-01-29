@@ -6,9 +6,7 @@
 """
 
 # System imports
-import datetime
 import logging
-import os
 import pprint
 
 # External imports
@@ -34,9 +32,14 @@ logger = logging.getLogger(__name__)
 
 # Main code starts here.
 
-class NetworkDevice():
-    """Represents a Network device.
-    INPUT: (Netbox device class, ZabbixAPI class, journal flag, NB journal class)
+class NetworkDevice:
+    """Class representing a Network device.
+    INPUT: (
+        Netbox device class,
+        ZabbixAPI class,
+        journal flag,
+        Netbox journal class,
+    )
     """
 
     _host_translations = str.maketrans({
@@ -294,12 +297,9 @@ class NetworkDevice():
             return False
 
     def set_interface_details(self):
-        """
-        Checks interface parameters from Netbox and
-        creates a model for the interface to be used in Zabbix.
+        """Set appropriate interface details.
         """
         try:
-            # Initiate interface class
             interface = ZabbixInterface(self.nb, self.ip)
             return [interface.interface]
         except exceptions.InterfaceConfigError as exc:
