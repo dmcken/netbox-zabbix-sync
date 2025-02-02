@@ -48,8 +48,8 @@ Groups are created and the hosts automatically populated based on the following 
 |  Field | Group Format  |  Description |
 | ----- | ------- | ------------ |
 | Location | Location - [Location Name] | |
-| Rack | Rack - [Rack Name] | |
 | Site | Site - [Site Name] | |
+| Rack | Rack - [Rack Name] | |
 | Role | Role - [Device Role] | |
 | Tenant | Tenant - [Tenant Name] | |
 
