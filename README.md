@@ -7,6 +7,22 @@ Compatible with:
 
 # Script settings
 
+## Install and installation in cron
+
+```bash
+git clone https://github.com/dmcken/netbox-zabbix-sync.git
+cd netbox-zabbix-sync
+python -m venv .venv
+```
+
+### Install to cron
+
+Insert into your crontab (`crontab -e`) to run the sync every 5 minutes:
+```
+*/5 * * * * cd /home/<username>/netbox-zabbix-sync/ && ./.venv/bin/python netbox_zabbix_sync.py
+```
+
+
 ### Command line flags
 |  Flag | Option  |  Description |
 | ----- | ------- | ------------ |
