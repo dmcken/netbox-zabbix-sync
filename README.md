@@ -1,9 +1,11 @@
 # General
 A script to sync the Netbox device inventory to Zabbix.
 
-Compatible with:
-* Netbox 3+
+Tested with:
+* Netbox 4+
 * Zabbix 7+
+
+This script may work with older versions but is not guaranteed.
 
 # Script settings
 
