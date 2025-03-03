@@ -402,11 +402,11 @@ class NetworkDevice:
         INPUT: Key word arguments for Zabbix host object.
         """
         try:
+            logger.debug(f"Updating host {self.zabbix_id} => {kwargs}")
             self.zabbix.host.update(hostid=self.zabbix_id, **kwargs)
         except pyzabbix.ZabbixAPIException as exc:
             err_msg = f"Zabbix returned the following error: {str(exc)}."
             logger.error(err_msg)
-            logger.error(traceback.format_exc())
             raise exceptions.SyncExternalError(err_msg) from exc
         logger.info(f"Updated host {self.name} with data {kwargs}.")
         self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
@@ -464,7 +464,7 @@ class NetworkDevice:
                 break
         else:
             logger.warning(f"Device {self.name}: template OUT of sync.")
-            self.update_zabbix_host(templates=self.template_id)
+            self.update_zabbix_host(templates=[{'templateid': self.template_id}])
 
         # Sync the hostgroups
         n_host_group_ids = []
