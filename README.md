@@ -27,7 +27,6 @@ Insert into your crontab (`crontab -e`) to run the sync every 5 minutes (update 
 */5 * * * * cd /home/<username>/netbox-zabbix-sync/ && ./.venv/bin/python netbox_zabbix_sync.py
 ```
 
-
 ### Command line flags
 |  Flag | Option  |  Description |
 | ----- | ------- | ------------ |
@@ -56,15 +55,32 @@ Groups are created and the hosts automatically populated based on the following 
 ### Custom groups:
 Now a custom tag of "ZabbixGroup#Hello" will proceed to create the group "Hello" if it doesn't exist and place the device inside of that group.
 
-## Netbox device status
-By setting a status on a Netbox device you determine how the host is added (or updated) in Zabbix. There are, by default, 3 options:
-* Create the host in Zabbix with an enabled status (For now only enabled with the "Active" status)
-* Create or update the host in Zabbix but with a disabled status (Trigger by "Failed", "Offline", "Planned" or "Staged")
-* Delete the host from Zabbix (triggered by Netbox status "Decommissioning" or "Inventory")
+
+
+## Tunables
+
+As the network source-of-truth any special configuration should be kept within netbox and pushed out to zabbix.
+
+### Netbox device status
+By setting a status on a Netbox device you determine how the host is added (or updated) in Zabbix. There are, by default, 3 options and their matching netbox statuses:
+* Create the host in Zabbix with an enabled status:
+    * Active
+* Create or update the host in Zabbix but with a disabled status:
+    * Failed
+    * Offline
+    * Planned
+    * Staged
+* Delete the host from Zabbix:
+    * Decommissioning
+    * Inventory
 
 You can modify this behaviour by changing the following list variables in the script:
  - zabbix_device_removal
  - zabbix_device_disable
+
+### Non-critical interfaces (pending)
+
+Current versions of zabbix using the Network interfaces discovery are using the macro IFCONTROL to mark interfaces as not important in the form {$IFCONTROL:"eth0"} set to 0 will not trigger an alert if eth0 goes down on that host.
 
 ## Set proxy within Netbox
 You can set the proxy for a device using the 'proxy' key in config context.
@@ -77,7 +93,7 @@ You can set the proxy for a device using the 'proxy' key in config context.
 ```
 Because of the posible amount of destruction when setting up Netbox but forgetting the proxy command, the sync works a bit different. By default everything is synced except in a situation where the Zabbix host has a proxy configured but nothing is configured in Netbox. To force deletion and a full sync, use the -p flag.
 
-## Set interface parameters within Netbox
+## Set Zabbix interface parameters within Netbox (being depreciated)
 When adding a new device, you can set the interface type with custom context.
 Due to Zabbix limitations of changing interface type with a linked template, changing the interface type from within Netbox is not supported and the script will generate an error.
 
