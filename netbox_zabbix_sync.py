@@ -8,6 +8,8 @@
 # System imports
 import logging
 import pprint
+import sys
+import traceback
 
 # External imports
 import pynetbox
@@ -284,6 +286,7 @@ class NetworkDevice:
             except pyzabbix.ZabbixAPIException as exc:
                 err_msg = f"Zabbix returned the following error: {str(exc)}."
                 logger.error(err_msg)
+                logger.error(traceback.format_exc())
                 raise exceptions.SyncExternalError(err_msg) from exc
 
     def _zabbix_hostname_exists(self):
@@ -341,7 +344,7 @@ class NetworkDevice:
                 except KeyError:
                     logger.error(f"Missing 'groupid' on: {curr_group}")
                     raise
-            n_host_group_ids = sorted(map(lambda x: int(x), n_host_group_ids))
+            n_host_group_ids = sorted(map(int, n_host_group_ids))
             groups = list(map(lambda x: {'groupid': x}, n_host_group_ids))
 
             # Set template IDs
@@ -399,6 +402,7 @@ class NetworkDevice:
         INPUT: Key word arguments for Zabbix host object.
         """
         try:
+            logger.debug(f"Updating host {self.zabbix_id} => {kwargs}")
             self.zabbix.host.update(hostid=self.zabbix_id, **kwargs)
         except pyzabbix.ZabbixAPIException as exc:
             err_msg = f"Zabbix returned the following error: {str(exc)}."
@@ -460,13 +464,13 @@ class NetworkDevice:
                 break
         else:
             logger.warning(f"Device {self.name}: template OUT of sync.")
-            self.update_zabbix_host(templates=self.template_id)
+            self.update_zabbix_host(templates=[{'templateid': self.template_id}])
 
         # Sync the hostgroups
         n_host_group_ids = []
         for curr_group in self.hostgroups:
             n_host_group_ids.append(zabbix_groups_map[curr_group]['groupid'])
-        n_host_group_ids = sorted(map(lambda x: int(x), n_host_group_ids))
+        n_host_group_ids = sorted(map(int, n_host_group_ids))
         z_host_group_ids = sorted(map(lambda x: int(x['groupid']), host['hostgroups']))
 
         logger.debug(f"Groups z: {z_host_group_ids} - n: {n_host_group_ids}")
@@ -560,6 +564,7 @@ class NetworkDevice:
                 except pyzabbix.ZabbixAPIException as exc:
                     err_msg = f"Zabbix returned the following error: {str(exc)}."
                     logger.error(err_msg)
+                    logger.error(traceback.format_exc())
                     raise exceptions.SyncExternalError(err_msg) from exc
             else:
                 # If no updates are found, Zabbix interface is in-sync
