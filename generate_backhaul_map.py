@@ -1,10 +1,12 @@
 #!/usr/bin/python3
 """Generate an auto-laid-out Zabbix map of the WISP backhaul topology.
 
-Pulls the inter-site wireless backhaul graph from Netbox, computes a
-layout that pulls sites tagged 'core-site' toward the center, annotates
-each link with live capacity/utilization pulled from Zabbix, and writes
-the result into a dedicated Zabbix map (never the hand-built source map).
+Pulls the inter-site wireless backhaul graph from Netbox, adds a central
+Internet cloud node connected to any site with a BGP/DIA circuit
+terminating there, computes a layout that pulls that cloud and
+'core-site'-tagged sites toward the center, annotates each backhaul link
+with live capacity/utilization pulled from Zabbix, and writes the result
+into a dedicated Zabbix map (never the hand-built source map).
 """
 
 # System imports
@@ -26,7 +28,8 @@ logger = logging.getLogger(__name__)
 SOURCE_MAP_NAME = "WISP - Overview"
 TARGET_MAP_NAME = "WISP - Auto Backhaul"
 CORE_TAG = "core-site"
-DEFAULT_ICONID = "3"  # Cloud_(48), matches the icon used in the source map.
+SITE_ICONID = "124"       # Router_(48).
+INTERNET_ICONID = "3"     # Cloud_(48) - kept distinct from regular sites.
 STALE_SECONDS = 15 * 60
 MARGIN = 100
 
@@ -34,6 +37,16 @@ COLOR_NO_DATA = "999999"
 COLOR_LOW = "00CC00"
 COLOR_MED = "FFAA00"
 COLOR_HIGH = "CC0000"
+COLOR_INTERNET = "0066CC"
+
+# Synthetic graph node representing the Internet cloud element. Not a
+# real Netbox site, so it's kept out of the '>' regex namespace used for
+# real site slugs.
+INTERNET_NODE = "__internet__"
+
+# Only these Netbox circuit types represent an actual Internet uplink;
+# e.g. a 'wan' circuit type might model inter-site fiber instead.
+INTERNET_CIRCUIT_TYPES = {"bgp", "dia"}
 
 _DEVICE_NAME_RE = re.compile(r'^BH_([A-Za-z0-9]+)>([A-Za-z0-9]+)')
 
@@ -72,6 +85,73 @@ def build_graph(netbox) -> nx.Graph:
     return graph
 
 
+def resolve_internet_circuits(netbox) -> dict:
+    """Returns {site_slug: {'name', 'provider', 'speed_kbps'}} for sites
+    with a BGP/DIA Netbox circuit terminating there.
+
+    A circuit's type lives on the circuit object, not the termination, so
+    circuits are fetched once and matched up by id. A circuit normally has
+    two terminations (the site end and the far/provider-network end);
+    speed is often only recorded on one side, so both are checked. A
+    circuit without any 'dcim.site' termination yet (not provisioned far
+    enough in Netbox) is skipped, not guessed at.
+    """
+    circuit_types = {c.id: c.type.slug for c in netbox.circuits.circuits.all()}
+
+    by_circuit = {}
+    for term in netbox.circuits.circuit_terminations.all():
+        if circuit_types.get(term.circuit.id) not in INTERNET_CIRCUIT_TYPES:
+            continue
+        by_circuit.setdefault(term.circuit.id, []).append(term)
+
+    sites = {}
+    for terms in by_circuit.values():
+        site_term = next((t for t in terms if t.termination_type == 'dcim.site'), None)
+        if site_term is None:
+            continue
+        speed_kbps = next(
+            (t.port_speed or t.upstream_speed for t in terms if t.port_speed or t.upstream_speed),
+            None,
+        )
+        site = site_term.termination
+        sites[site.slug] = {
+            'name': site.name,
+            'provider': site_term.circuit.provider.name,
+            'speed_kbps': speed_kbps,
+        }
+    return sites
+
+
+def add_internet_node(graph: nx.Graph, netbox) -> None:
+    """Adds a synthetic Internet cloud node to the graph, in place.
+
+    Connects it to every site with a BGP/DIA circuit terminating there
+    per Netbox Circuits (see resolve_internet_circuits). A qualifying
+    site not already in the backhaul graph (e.g. a datacenter with no
+    wireless links of its own) is still added, so the map shows the
+    actual uplink point even if it's otherwise disconnected from the
+    wireless mesh.
+    """
+    internet_sites = resolve_internet_circuits(netbox)
+    if not internet_sites:
+        logger.warning(
+            "No BGP/DIA circuit has a site termination in Netbox; the "
+            "Internet cloud will not be drawn this run."
+        )
+        return
+
+    graph.add_node(INTERNET_NODE, name="Internet", is_core=False)
+    for slug, info in internet_sites.items():
+        if slug not in graph:
+            graph.add_node(slug, name=info['name'], is_core=False)
+        graph.add_edge(
+            slug, INTERNET_NODE,
+            is_internet_link=True,
+            provider=info['provider'],
+            speed_kbps=info['speed_kbps'],
+        )
+
+
 def _ring_positions(nodes, center_x, center_y, radius) -> dict:
     """Places nodes evenly spaced around a circle of the given radius."""
     count = len(nodes)
@@ -95,21 +175,26 @@ def compute_layout(graph, width, height, margin=MARGIN) -> dict:
     sites on the outer ring) rather than networkx's shell_layout, since
     that pulls in numpy - which fails to import on this host's CPU (no
     AVX2/SSE4.2 support, a plain KVM guest). This graph is small (a
-    couple dozen sites at most), so a hand-rolled layout is plenty.
+    couple dozen sites at most), so a hand-rolled layout is plenty. The
+    Internet node, if present, is pinned to the exact center instead of
+    being placed on either ring.
     """
-    core = [n for n, data in graph.nodes(data=True) if data['is_core']]
-    edge = [n for n, data in graph.nodes(data=True) if not data['is_core']]
+    site_nodes = [n for n in graph.nodes() if n != INTERNET_NODE]
+    core = [n for n in site_nodes if graph.nodes[n]['is_core']]
+    edge = [n for n in site_nodes if not graph.nodes[n]['is_core']]
     if not core:
         logger.warning(
             "No sites tagged 'core-site' - treating all sites as one ring."
         )
-        edge = list(graph.nodes())
+        edge = site_nodes
 
     center_x, center_y = width / 2, height / 2
     outer_radius = min(width, height) / 2 - margin
     inner_radius = outer_radius * 0.35 if edge else 0
 
     positions = {}
+    if INTERNET_NODE in graph:
+        positions[INTERNET_NODE] = (center_x, center_y)
     positions.update(_ring_positions(core, center_x, center_y, inner_radius))
     positions.update(_ring_positions(edge, center_x, center_y, outer_radius))
 
@@ -253,7 +338,7 @@ def build_selements(positions: dict, graph: nx.Graph):
         selements.append({
             'selementid': str(idx),
             'elementtype': '4',  # Plain image, matching the source map's convention.
-            'iconid_off': DEFAULT_ICONID,
+            'iconid_off': INTERNET_ICONID if slug == INTERNET_NODE else SITE_ICONID,
             'label': graph.nodes[slug]['name'],
             'x': x,
             'y': y,
@@ -267,6 +352,23 @@ def build_links(graph: nx.Graph, slug_to_id: dict, zabbix) -> list:
     """Builds the links list with live capacity/utilization labels."""
     links = []
     for site_a, site_b, data in graph.edges(data=True):
+        if data.get('is_internet_link'):
+            # A Netbox circuit, not a Zabbix-monitored radio - there's no
+            # live utilization to poll, but the termination's provisioned
+            # speed is real data worth labelling with.
+            if data['speed_kbps']:
+                label = f"{data['provider']}: {data['speed_kbps'] / 1000:.0f} Mbps"
+            else:
+                label = data['provider']
+            links.append({
+                'selementid1': slug_to_id[site_a],
+                'selementid2': slug_to_id[site_b],
+                'drawtype': '0',
+                'color': COLOR_INTERNET,
+                'label': label,
+            })
+            continue
+
         metrics = resolve_link_metrics(zabbix, zabbix_host_name(data['device_a']))
         if metrics['utilization_pct'] is None:
             # Radios at each end are separate Zabbix hosts; fall back to
@@ -293,6 +395,7 @@ def main():
     netbox = utils.connect_netbox(config)
 
     graph = build_graph(netbox)
+    add_internet_node(graph, netbox)
     logger.info(
         f"Backhaul graph: {graph.number_of_nodes()} sites, "
         f"{graph.number_of_edges()} links."

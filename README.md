@@ -181,7 +181,7 @@ Once a handful of hosts have coordinates populated, create a **Geomap** widget o
 ### Backhaul topology map
 `generate_backhaul_map.py` builds a map of the inter-site wireless backhaul links (from Netbox's Wireless Links) and writes it to a dedicated Zabbix map, **`WISP - Auto Backhaul`**, annotating each link with a live capacity/utilization label pulled from Zabbix (e.g. `142 Mbps / 45%`, or `no data` where a link's SNMP items aren't currently populated). It never modifies the hand-built `WISP - Overview` map — it only reads it once, on first run, to clone the canvas size.
 
-Sites tagged `core-site` in Netbox (e.g. sites with external upstream/provider connectivity) are pulled toward the center of the layout; every other linked site is placed on an outer ring. Apply the tag to any site that should be treated as core.
+Sites tagged `core-site` in Netbox are pulled toward an inner ring around the center; every other linked site sits on an outer ring. Dead center is a synthetic **Internet** cloud element, connected to any site with a Netbox circuit of type `BGP` or `DIA` terminating there (other circuit types, e.g. `WAN`, are not treated as Internet uplinks). That edge is labelled with the circuit's provider and provisioned speed rather than live utilization, since it's not a Zabbix-monitored radio. A site with such a circuit is added to the map even if it isn't otherwise part of the wireless backhaul mesh (e.g. a datacenter) - tag it `core-site` too if it should sit near the center rather than on the outer ring.
 
 The script fully regenerates the map's elements and links on every run - it holds no state of its own, so it's safe to run repeatedly (e.g. every 15 minutes via cron, see above) or by hand:
 ```bash
