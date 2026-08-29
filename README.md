@@ -27,6 +27,11 @@ Insert into your crontab (`crontab -e`) to run the sync every 5 minutes (update 
 */5 * * * * cd /home/<username>/netbox-zabbix-sync/ && ./.venv/bin/python netbox_zabbix_sync.py
 ```
 
+If you're also using the backhaul map generator (see "Site maps" below), add a second line on a slower cadence, since topology and utilization change far less often than device state:
+```
+*/15 * * * * cd /home/<username>/netbox-zabbix-sync/ && ./.venv/bin/python generate_backhaul_map.py
+```
+
 ### Command line flags
 |  Flag | Option  |  Description |
 | ----- | ------- | ------------ |
@@ -165,6 +170,25 @@ Note: Not all SNMP data is required for a working configuration. [The following 
 
 ## Permissions
 Make sure that the user has proper permissions for device read and modify (modify to set the Zabbix HostID custom field) operations.
+
+## Site maps
+
+### Geographic outage map
+`netbox_zabbix_sync.py` pushes each device's Netbox site `latitude`/`longitude` into the Zabbix host's Inventory (`location_lat`/`location_lon`, `inventory_mode` set to Manual), for any site that has coordinates set. Devices at sites without coordinates are skipped silently.
+
+Once a handful of hosts have coordinates populated, create a **Geomap** widget on a Zabbix dashboard (Dashboards → Edit dashboard → Add widget → type "Geomap") to see them plotted on a real map, colored by live problem severity. This widget is a one-time manual setup step; it isn't created automatically.
+
+### Backhaul topology map
+`generate_backhaul_map.py` builds a map of the inter-site wireless backhaul links (from Netbox's Wireless Links) and writes it to a dedicated Zabbix map, **`WISP - Auto Backhaul`**, annotating each link with a live capacity/utilization label pulled from Zabbix (e.g. `142 Mbps / 45%`, or `no data` where a link's SNMP items aren't currently populated). It never modifies the hand-built `WISP - Overview` map — it only reads it once, on first run, to clone the canvas size.
+
+Sites tagged `core-site` in Netbox (e.g. sites with external upstream/provider connectivity) are pulled toward the center of the layout; every other linked site is placed on an outer ring. Apply the tag to any site that should be treated as core.
+
+The script fully regenerates the map's elements and links on every run - it holds no state of its own, so it's safe to run repeatedly (e.g. every 15 minutes via cron, see above) or by hand:
+```bash
+./.venv/bin/python generate_backhaul_map.py -v
+```
+
+Known limitation: per-link capacity/utilization is resolved by matching Zabbix item key prefixes (`net.if.in`/`net.if.out`/`net.if.speed` for SNMP-monitored radios, `throughput.*`/`capacity.*` for others) and preferring an item whose name contains "radio" when a host exposes multiple interfaces polled in the same cycle. This is a best-effort heuristic, not a guarantee - if a link shows `no data`, check that the backhaul host's SNMP polling is actually populated in Zabbix first.
 
 ## Custom links
 To make the user experience easier you could add a custom link that redirects users to the Zabbix latest data.

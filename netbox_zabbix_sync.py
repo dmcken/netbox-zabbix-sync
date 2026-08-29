@@ -116,6 +116,25 @@ class NetworkDevice:
             logger.warning(e)
             raise exceptions.SyncInventoryError(e)
 
+        # Site GPS coordinates, used to populate the Zabbix Geomap widget.
+        # Left unset (None) if the Netbox site has no coordinates.
+        self.site_lat = utils.rgetattr(self.nb, 'site.latitude', None)
+        self.site_lon = utils.rgetattr(self.nb, 'site.longitude', None)
+
+    def _geo_inventory(self) -> dict:
+        """Returns Zabbix host.update/create kwargs for the site's GPS
+        coordinates, or an empty dict if the Netbox site has none set.
+        """
+        if self.site_lat is None or self.site_lon is None:
+            return {}
+        return {
+            'inventory_mode': 0,
+            'inventory': {
+                'location_lat': str(self.site_lat),
+                'location_lon': str(self.site_lon),
+            },
+        }
+
     def set_host_groups(self):
         '''
         Sets the various hostgroups desired
@@ -319,6 +338,7 @@ class NetworkDevice:
             if self.zbxproxy != "0":
                 create_kwargs["monitored_by"] = 1
                 create_kwargs["proxyid"] = self.zbxproxy
+            create_kwargs.update(self._geo_inventory())
 
             # Add host to Zabbix
             try:
@@ -378,6 +398,7 @@ class NetworkDevice:
             ],
             selectHostGroups=["groupid"],
             selectParentTemplates=["templateid"],
+            selectInventory=["location_lat", "location_lon"],
         )
         if len(host) > 1:
             err_msg = (
@@ -460,6 +481,23 @@ class NetworkDevice:
                                  f"with proxy in Zabbix but not in Netbox. The"
                                  " -p flag was ommited: no "
                                  "changes have been made.")
+
+        # Sync site GPS coordinates (drives the Zabbix Geomap widget).
+        # Skipped entirely if the Netbox site has no coordinates set.
+        if self.site_lat is not None and self.site_lon is not None:
+            z_inventory = host.get("inventory")
+            if not isinstance(z_inventory, dict):
+                z_inventory = {}
+            z_lat = z_inventory.get("location_lat", "")
+            z_lon = z_inventory.get("location_lon", "")
+            if (host["inventory_mode"] != "0"
+                    or z_lat != str(self.site_lat)
+                    or z_lon != str(self.site_lon)):
+                logger.warning(f"Device {self.name}: location OUT of sync.")
+                self.update_zabbix_host(**self._geo_inventory())
+            else:
+                logger.debug(f"Device {self.name}: location in-sync.")
+
         # If only 1 interface has been found
         if len(host['interfaces']) == 1:
             updates = {}

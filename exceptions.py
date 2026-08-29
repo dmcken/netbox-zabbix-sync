@@ -23,3 +23,6 @@ class InterfaceConfigError(SyncError):
 
 class ProxyConfigError(SyncError):
     '''Error setting the proxy on zabbix.'''
+
+class MapUpdateError(SyncError):
+    '''Error updating a Zabbix map.'''
