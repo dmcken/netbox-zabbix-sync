@@ -1,12 +1,16 @@
 #!/usr/bin/python3
-"""Generate an auto-laid-out Zabbix map of the WISP backhaul topology.
+"""Generate auto-laid-out Zabbix maps of the WISP backhaul topology.
 
 Pulls the inter-site wireless backhaul graph from Netbox, adds a central
 Internet cloud node connected to any site with a BGP/DIA circuit
 terminating there, computes a layout that pulls that cloud and
 'core-site'-tagged sites toward the center, annotates each backhaul link
 with live capacity/utilization pulled from Zabbix, and writes the result
-into a dedicated Zabbix map (never the hand-built source map).
+into a dedicated overview map. Each site element on that map is also a
+clickable drill-down link into a dedicated per-site map (auto-created the
+same way), laid out with that site's core/edge router at the center and
+its other Zabbix-monitored hosts around it. Never touches the hand-built
+'WISP - Overview' map.
 """
 
 # System imports
@@ -25,8 +29,15 @@ import utils
 
 logger = logging.getLogger(__name__)
 
-SOURCE_MAP_NAME = "WISP - Overview"
 TARGET_MAP_NAME = "WISP - Auto Backhaul"
+TARGET_WIDTH = 1200
+TARGET_HEIGHT = 900
+
+SITE_MAP_MIN_SIZE = 700         # Canvas floor for a small site.
+SITE_MAP_MAX_SIZE = 2200        # Cap for a site with a lot of hosts (e.g. DAN).
+SITE_MAP_PX_PER_HOST = 30       # Roughly how much ring circumference a host needs.
+SITE_MAP_ASPECT = 0.75          # height = width * this.
+
 CORE_TAG = "core-site"
 SITE_ICONID = "124"       # Router_(48).
 INTERNET_ICONID = "3"     # Cloud_(48) - kept distinct from regular sites.
@@ -291,65 +302,201 @@ def color_for_utilization(pct) -> str:
     return COLOR_HIGH
 
 
-def get_or_create_target_map(zabbix, source_name: str, target_name: str) -> dict:
-    """Returns the target map, cloning it from the source map on first run.
+def get_or_create_map(zabbix, name: str, width: int, height: int) -> str:
+    """Returns the sysmapid for a map with this name, creating a blank one
+    at the given size if it doesn't exist yet, or resizing it if it does.
 
-    Never mutates the source map, so the hand-built topology map stays
-    untouched while the generated one is validated.
+    Used for both the overview map and every per-site map - none of them
+    are cloned from the hand-built 'WISP - Overview' map, which this
+    script never reads or writes.
     """
-    existing = zabbix.map.get(
-        filter={'name': target_name}, selectSelements='extend', selectLinks='extend',
-    )
+    existing = zabbix.map.get(filter={'name': name}, output=['sysmapid', 'width', 'height'])
     if existing:
-        return existing[0]
-
-    source = zabbix.map.get(filter={'name': source_name}, output='extend')
-    if not source:
-        raise exceptions.MapUpdateError(
-            f"Source map '{source_name}' not found in Zabbix; cannot "
-            f"create '{target_name}'."
-        )
+        sysmapid = existing[0]['sysmapid']
+        if int(existing[0]['width']) != width or int(existing[0]['height']) != height:
+            zabbix.map.update(sysmapid=sysmapid, width=width, height=height)
+        return sysmapid
 
     try:
         created = zabbix.map.create(
-            name=target_name,
-            width=source[0]['width'],
-            height=source[0]['height'],
+            name=name,
+            width=width,
+            height=height,
             selements=[],
             links=[],
-            # Every element on this map is a plain image (elementtype 4),
-            # which has no host/trigger identity - Zabbix's "Element name"
-            # default (what a freshly created map gets) has nothing to
-            # show for that, and falls back to the generic type name
-            # "Image". "Label" (0) is what actually renders each
-            # selement's own 'label' text (e.g. "Internet", "Tower - FIB").
+            # A plain image element (elementtype 4, used for the overview
+            # map's site/Internet nodes) has no host/trigger identity -
+            # Zabbix's "Element name" default (what a freshly created map
+            # gets) has nothing to show for that, and falls back to the
+            # generic type name "Image". "Label" (0) is what actually
+            # renders each selement's own 'label' text. Host-type elements
+            # (used on per-site maps) render correctly either way, since
+            # they have a real name to show.
             label_type_image=0,
         )
     except pyzabbix.ZabbixAPIException as exc:
-        err_msg = f"Zabbix returned the following error creating '{target_name}': {exc}."
+        err_msg = f"Zabbix returned the following error creating '{name}': {exc}."
         logger.error(err_msg)
         raise exceptions.MapUpdateError(err_msg) from exc
 
-    logger.info(f"Created new map '{target_name}' (sysmapid {created['sysmapids'][0]}).")
-    new_map = zabbix.map.get(
-        sysmapids=created['sysmapids'], selectSelements='extend', selectLinks='extend',
-    )
-    return new_map[0]
+    logger.info(f"Created new map '{name}' (sysmapid {created['sysmapids'][0]}).")
+    return created['sysmapids'][0]
 
 
-def build_selements(positions: dict, graph: nx.Graph):
-    """Builds the selements list plus a site-slug -> selementid lookup."""
+def find_hub_host(host_names, site_code: str):
+    """Finds a site's core/edge router, used as its per-site map's hub.
+
+    Prefers an exact '<CODE>-CE1'; falls back to the lowest-numbered
+    '<CODE>-CE<N>' if CE1 doesn't exist (some sites have been renumbered
+    and skip it). Anchored to the site code so an unrelated host that
+    merely ends in '-CE1' (e.g. a decommissioned device from another
+    site) is never mistaken for this site's router. Returns None if the
+    site has no CE-series router at all - callers must not guess at one.
+    """
+    pattern = re.compile(rf'^{re.escape(site_code)}-CE(\d+)$', re.IGNORECASE)
+    candidates = []
+    for name in host_names:
+        match = pattern.match(name)
+        if match:
+            candidates.append((int(match.group(1)), name))
+    if not candidates:
+        return None
+    return min(candidates)[1]
+
+
+def site_map_dimensions(host_count: int) -> tuple:
+    """Scales a site map's canvas with its host count, within sane bounds.
+
+    A handful of hosts fit comfortably on a compact canvas; a site with
+    dozens (e.g. a large tower) needs more room so icons/labels don't
+    overlap, but is still capped rather than growing unbounded.
+    """
+    width = min(max(SITE_MAP_MIN_SIZE, host_count * SITE_MAP_PX_PER_HOST), SITE_MAP_MAX_SIZE)
+    return width, int(width * SITE_MAP_ASPECT)
+
+
+def build_site_map_content(hosts: list, site_code: str, width: int, height: int, margin=MARGIN):
+    """Builds the selements/links for one site's map.
+
+    The site's core/edge router (see find_hub_host) sits at the center,
+    star-connected to every other host on an outer ring. If no such
+    router is found, hosts are placed on a single ring with no synthetic
+    links, rather than inventing a topology with no supporting data.
+    """
+    host_names = {h['hostid']: h['host'] for h in hosts}
+    hub_name = find_hub_host(host_names.values(), site_code)
+    hub_id = next((hid for hid, name in host_names.items() if name == hub_name), None)
+    others = [hid for hid in host_names if hid != hub_id]
+
+    center_x, center_y = width / 2, height / 2
+    outer_radius = min(width, height) / 2 - margin
+
+    positions = {}
+    if hub_id:
+        positions[hub_id] = (center_x, center_y)
+        positions.update(_ring_positions(others, center_x, center_y, outer_radius))
+    else:
+        positions.update(_ring_positions(list(host_names), center_x, center_y, outer_radius))
+
+    selements = []
+    id_map = {}
+    for idx, (hostid, (x, y)) in enumerate(positions.items(), start=1):
+        selements.append({
+            'selementid': str(idx),
+            'elementtype': '0',  # Real Zabbix host - shows live problem status natively.
+            'elements': [{'hostid': hostid}],
+            'iconid_off': SITE_ICONID,
+            'label': host_names[hostid],
+            'x': int(x),
+            'y': int(y),
+        })
+        id_map[hostid] = str(idx)
+
+    links = []
+    if hub_id:
+        for hostid in others:
+            links.append({
+                'selementid1': id_map[hub_id],
+                'selementid2': id_map[hostid],
+                'drawtype': '0',
+                'color': COLOR_LOW,
+            })
+
+    return selements, links
+
+
+def generate_site_map(zabbix, site_name: str):
+    """Creates/updates the per-site map for one site. Returns its
+    sysmapid, or None if the site has no Zabbix hostgroup/hosts to show
+    (e.g. it's brand new in Netbox and hasn't synced any devices yet).
+    """
+    group = zabbix.hostgroup.get(filter={'name': f'Site - {site_name}'}, output=['groupid'])
+    if not group:
+        logger.warning(f"No Zabbix hostgroup 'Site - {site_name}'; skipping its site map.")
+        return None
+
+    hosts = zabbix.host.get(groupids=[group[0]['groupid']], output=['hostid', 'host'])
+    if not hosts:
+        logger.warning(f"No Zabbix hosts in group 'Site - {site_name}'; skipping its site map.")
+        return None
+
+    site_code = site_name.rsplit(' - ', 1)[-1]
+    width, height = site_map_dimensions(len(hosts))
+    sysmapid = get_or_create_map(zabbix, site_name, width, height)
+
+    selements, links = build_site_map_content(hosts, site_code, width, height)
+    try:
+        zabbix.map.update(sysmapid=sysmapid, selements=selements, links=links)
+    except pyzabbix.ZabbixAPIException as exc:
+        err_msg = f"Zabbix returned the following error updating site map '{site_name}': {exc}."
+        logger.error(err_msg)
+        raise exceptions.MapUpdateError(err_msg) from exc
+
+    logger.info(f"Updated site map '{site_name}' with {len(selements)} hosts.")
+    return sysmapid
+
+
+def build_site_maps(zabbix, graph: nx.Graph) -> dict:
+    """Creates/updates a per-site map for every real site node in the
+    graph (skipping the synthetic Internet node). Returns
+    {site_slug: sysmapid} for sites whose map was built successfully -
+    used to wire up the overview map's drill-down links.
+    """
+    site_map_ids = {}
+    for slug in graph.nodes():
+        if slug == INTERNET_NODE:
+            continue
+        sysmapid = generate_site_map(zabbix, graph.nodes[slug]['name'])
+        if sysmapid:
+            site_map_ids[slug] = sysmapid
+    return site_map_ids
+
+
+def build_selements(positions: dict, graph: nx.Graph, site_map_ids: dict):
+    """Builds the selements list plus a site-slug -> selementid lookup.
+
+    A site with a per-site map (site_map_ids) becomes a 'Map' element
+    (elementtype 1), so clicking it drills down into that site's own map.
+    Everything else (the Internet cloud, or a site whose map couldn't be
+    built) stays a plain image, same as before.
+    """
     selements = []
     slug_to_id = {}
     for idx, (slug, (x, y)) in enumerate(positions.items(), start=1):
+        if slug in site_map_ids:
+            elementtype = '1'
+            elements = [{'sysmapid': site_map_ids[slug]}]
+        else:
+            elementtype = '4'
+            elements = []
         selements.append({
             'selementid': str(idx),
-            'elementtype': '4',  # Plain image, matching the source map's convention.
+            'elementtype': elementtype,
             'iconid_off': INTERNET_ICONID if slug == INTERNET_NODE else SITE_ICONID,
             'label': graph.nodes[slug]['name'],
             'x': x,
             'y': y,
-            'elements': [],
+            'elements': elements,
         })
         slug_to_id[slug] = str(idx)
     return selements, slug_to_id
@@ -408,14 +555,16 @@ def main():
         f"{graph.number_of_edges()} links."
     )
 
-    target_map = get_or_create_target_map(zabbix, SOURCE_MAP_NAME, TARGET_MAP_NAME)
-    positions = compute_layout(graph, int(target_map['width']), int(target_map['height']))
+    site_map_ids = build_site_maps(zabbix, graph)
 
-    selements, slug_to_id = build_selements(positions, graph)
+    target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, TARGET_WIDTH, TARGET_HEIGHT)
+    positions = compute_layout(graph, TARGET_WIDTH, TARGET_HEIGHT)
+
+    selements, slug_to_id = build_selements(positions, graph, site_map_ids)
     links = build_links(graph, slug_to_id, zabbix)
 
     try:
-        zabbix.map.update(sysmapid=target_map['sysmapid'], selements=selements, links=links)
+        zabbix.map.update(sysmapid=target_sysmapid, selements=selements, links=links)
     except pyzabbix.ZabbixAPIException as exc:
         err_msg = f"Zabbix returned the following error updating the map: {exc}."
         logger.error(err_msg)
