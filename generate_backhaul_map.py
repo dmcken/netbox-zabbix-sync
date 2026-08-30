@@ -317,6 +317,13 @@ def get_or_create_target_map(zabbix, source_name: str, target_name: str) -> dict
             height=source[0]['height'],
             selements=[],
             links=[],
+            # Every element on this map is a plain image (elementtype 4),
+            # which has no host/trigger identity - Zabbix's "Element name"
+            # default (what a freshly created map gets) has nothing to
+            # show for that, and falls back to the generic type name
+            # "Image". "Label" (0) is what actually renders each
+            # selement's own 'label' text (e.g. "Internet", "Tower - FIB").
+            label_type_image=0,
         )
     except pyzabbix.ZabbixAPIException as exc:
         err_msg = f"Zabbix returned the following error creating '{target_name}': {exc}."
