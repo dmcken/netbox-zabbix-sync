@@ -375,13 +375,100 @@ def site_map_dimensions(host_count: int) -> tuple:
     return width, int(width * SITE_MAP_ASPECT)
 
 
-def build_site_map_content(hosts: list, site_code: str, width: int, height: int, margin=MARGIN):
+def resolve_site_topology(netbox, site_slug: str, hosts: list) -> list:
+    """Returns real device-to-device links within a site, from Netbox
+    cable connections only - never inferred or assumed.
+
+    Restricted to device pairs that both have a Zabbix host already on
+    this site's map (the passed-in `hosts`), so a cable to an unsynced
+    or out-of-site device is silently skipped rather than drawn as a
+    dangling edge. Each entry is
+    (hostid_a, hostid_b, interface_name_a, interface_name_b) - the exact
+    interface names are kept so bandwidth can later be resolved from the
+    precise Zabbix SNMP item for that interface, not guessed at.
+    """
+    valid_hostids = {h['hostid'] for h in hosts}
+    device_to_hostid = {}
+    for device in netbox.dcim.devices.filter(site=site_slug):
+        zbx_id = device.custom_fields.get('zabbix_hostid')
+        if zbx_id is not None and str(zbx_id) in valid_hostids:
+            device_to_hostid[device.id] = str(zbx_id)
+
+    if not device_to_hostid:
+        return []
+
+    seen_cables = set()
+    links = []
+    for iface in netbox.dcim.interfaces.filter(device_id=list(device_to_hostid)):
+        cable = getattr(iface, 'cable', None)
+        if not cable or cable.id in seen_cables:
+            continue
+        endpoints = getattr(iface, 'connected_endpoints', None) or []
+        if len(endpoints) != 1:
+            continue
+        peer_device = getattr(endpoints[0], 'device', None)
+        if peer_device is None or peer_device.id not in device_to_hostid:
+            continue
+        seen_cables.add(cable.id)
+        links.append((
+            device_to_hostid[iface.device.id],
+            device_to_hostid[peer_device.id],
+            iface.name,
+            endpoints[0].name,
+        ))
+    return links
+
+
+def resolve_interface_metrics(zabbix, hostid: str, interface_name: str) -> dict:
+    """Fetches live capacity/utilization for one specific interface.
+
+    Unlike a backhaul radio (where the interesting interface has to be
+    guessed at - see resolve_link_metrics), a Netbox cable connection
+    tells us exactly which interface to look at, so this matches the
+    Zabbix SNMP item's own embedded interface name
+    (e.g. "Interface sfp-sfpplus3(...): Bits received") precisely,
+    without needing any tie-breaking heuristic.
+    """
+    items = zabbix.item.get(
+        hostids=[hostid], output=['key_', 'name', 'lastvalue', 'lastclock'],
+    )
+    prefix = f"Interface {interface_name}("
+    scoped = [i for i in items if i['name'].startswith(prefix)]
+
+    def freshest(*key_prefixes):
+        matches = [i for i in scoped if any(i['key_'].startswith(p) for p in key_prefixes)]
+        matches = [i for i in matches if int(i['lastclock']) > 0]
+        return max(matches, key=lambda i: int(i['lastclock'])) if matches else None
+
+    throughput_item = freshest('net.if.in[', 'net.if.out[')
+    capacity_item = freshest('net.if.speed[')
+
+    if not throughput_item or not capacity_item:
+        return {'utilization_pct': None, 'label': "no data"}
+    if time.time() - int(throughput_item['lastclock']) > STALE_SECONDS:
+        return {'utilization_pct': None, 'label': "no data"}
+
+    throughput_bps = float(throughput_item['lastvalue'])
+    capacity_bps = float(capacity_item['lastvalue'])
+    if capacity_bps <= 0:
+        return {'utilization_pct': None, 'label': "no data"}
+
+    pct = throughput_bps / capacity_bps * 100
+    label = f"{throughput_bps / 1e6:.0f} Mbps / {pct:.0f}%"
+    return {'utilization_pct': pct, 'label': label}
+
+
+def build_site_map_content(
+    zabbix, hosts: list, topology_links: list, site_code: str,
+    width: int, height: int, margin=MARGIN,
+):
     """Builds the selements/links for one site's map.
 
-    The site's core/edge router (see find_hub_host) sits at the center,
-    star-connected to every other host on an outer ring. If no such
-    router is found, hosts are placed on a single ring with no synthetic
-    links, rather than inventing a topology with no supporting data.
+    Layout still centers the site's core/edge router (see find_hub_host)
+    for readability, but links are drawn only for real Netbox cable
+    connections between the site's hosts (topology_links) - a host with
+    no such connection is simply left unconnected, rather than wired
+    into a guessed-at star.
     """
     host_names = {h['hostid']: h['host'] for h in hosts}
     hub_name = find_hub_host(host_names.values(), site_code)
@@ -413,19 +500,23 @@ def build_site_map_content(hosts: list, site_code: str, width: int, height: int,
         id_map[hostid] = str(idx)
 
     links = []
-    if hub_id:
-        for hostid in others:
-            links.append({
-                'selementid1': id_map[hub_id],
-                'selementid2': id_map[hostid],
-                'drawtype': '0',
-                'color': COLOR_LOW,
-            })
+    for hostid_a, hostid_b, iface_a, iface_b in topology_links:
+        metrics = resolve_interface_metrics(zabbix, hostid_a, iface_a)
+        if metrics['utilization_pct'] is None:
+            # Try the far end before giving up on this link's bandwidth.
+            metrics = resolve_interface_metrics(zabbix, hostid_b, iface_b)
+        links.append({
+            'selementid1': id_map[hostid_a],
+            'selementid2': id_map[hostid_b],
+            'drawtype': '0',
+            'color': color_for_utilization(metrics['utilization_pct']),
+            'label': metrics['label'],
+        })
 
     return selements, links
 
 
-def generate_site_map(zabbix, site_name: str):
+def generate_site_map(zabbix, netbox, site_slug: str, site_name: str):
     """Creates/updates the per-site map for one site. Returns its
     sysmapid, or None if the site has no Zabbix hostgroup/hosts to show
     (e.g. it's brand new in Netbox and hasn't synced any devices yet).
@@ -441,10 +532,12 @@ def generate_site_map(zabbix, site_name: str):
         return None
 
     site_code = site_name.rsplit(' - ', 1)[-1]
+    topology_links = resolve_site_topology(netbox, site_slug, hosts)
+
     width, height = site_map_dimensions(len(hosts))
     sysmapid = get_or_create_map(zabbix, site_name, width, height)
 
-    selements, links = build_site_map_content(hosts, site_code, width, height)
+    selements, links = build_site_map_content(zabbix, hosts, topology_links, site_code, width, height)
     try:
         zabbix.map.update(sysmapid=sysmapid, selements=selements, links=links)
     except pyzabbix.ZabbixAPIException as exc:
@@ -452,11 +545,14 @@ def generate_site_map(zabbix, site_name: str):
         logger.error(err_msg)
         raise exceptions.MapUpdateError(err_msg) from exc
 
-    logger.info(f"Updated site map '{site_name}' with {len(selements)} hosts.")
+    logger.info(
+        f"Updated site map '{site_name}' with {len(selements)} hosts "
+        f"and {len(links)} real cable links."
+    )
     return sysmapid
 
 
-def build_site_maps(zabbix, graph: nx.Graph) -> dict:
+def build_site_maps(zabbix, netbox, graph: nx.Graph) -> dict:
     """Creates/updates a per-site map for every real site node in the
     graph (skipping the synthetic Internet node). Returns
     {site_slug: sysmapid} for sites whose map was built successfully -
@@ -466,7 +562,7 @@ def build_site_maps(zabbix, graph: nx.Graph) -> dict:
     for slug in graph.nodes():
         if slug == INTERNET_NODE:
             continue
-        sysmapid = generate_site_map(zabbix, graph.nodes[slug]['name'])
+        sysmapid = generate_site_map(zabbix, netbox, slug, graph.nodes[slug]['name'])
         if sysmapid:
             site_map_ids[slug] = sysmapid
     return site_map_ids
@@ -555,7 +651,7 @@ def main():
         f"{graph.number_of_edges()} links."
     )
 
-    site_map_ids = build_site_maps(zabbix, graph)
+    site_map_ids = build_site_maps(zabbix, netbox, graph)
 
     target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, TARGET_WIDTH, TARGET_HEIGHT)
     positions = compute_layout(graph, TARGET_WIDTH, TARGET_HEIGHT)
