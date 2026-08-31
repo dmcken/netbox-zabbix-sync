@@ -155,6 +155,7 @@ def fetch_sync_config():
         "NETBOX_HOST",
         "NETBOX_TOKEN",
         "NETBOX_ROLE_IGNORE",
+        "NETBOX_PREFER_IPV4",
     ]
     for var in env_vars:
         config[var] = os.environ.get(var, None)
@@ -163,6 +164,12 @@ def fetch_sync_config():
     if config["NETBOX_ROLE_IGNORE"] is not None:
         parts = config["NETBOX_ROLE_IGNORE"].split(',')
         config["NETBOX_ROLE_IGNORE"] = parts
+
+    # Default False: unchanged behavior (whatever Netbox itself considers
+    # primary_ip). Only "1"/"true"/"yes" (case-insensitive) opt in.
+    config["NETBOX_PREFER_IPV4"] = str(config["NETBOX_PREFER_IPV4"]).strip().lower() in (
+        "1", "true", "yes",
+    )
 
     return config
 

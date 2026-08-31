@@ -8,6 +8,7 @@
 # System imports
 import logging
 import pprint
+import re
 import sys
 import traceback
 
@@ -30,6 +31,12 @@ CF = {
 zabbix_device_removal = ["Decommissioning", "Inventory"]
 zabbix_device_disable = ["Offline", "Planned", "Staged", "Failed"]
 
+# Set by main() from NETBOX_PREFER_IPV4 in .env. False (default) keeps
+# today's behavior unchanged - whatever Netbox itself considers
+# primary_ip. True uses a device's IPv4 primary address even when
+# Netbox's primary_ip resolved to IPv6.
+prefer_ipv4 = False
+
 logger = logging.getLogger(__name__)
 
 # Main code starts here.
@@ -44,9 +51,10 @@ class NetworkDevice:
     )
     """
 
-    _host_translations = str.maketrans({
-        '>': '_',
-    })
+    # Anything outside Zabbix's allowed host name character set (see
+    # _clean_hostname) is replaced with '_' - customer/site names can
+    # contain arbitrary punctuation (e.g. a '/' in a street address).
+    _host_disallowed_chars = re.compile(r'[^A-Za-z0-9 ._-]')
 
     def __init__(self, nb_device, zabbix, nb_journal_class, journal=None):
         '''NetworkDevice Constructor.
@@ -80,18 +88,23 @@ class NetworkDevice:
         Alphanumerics, spaces, dots, dashes and underscores are allowed
         '''
         # The name may not always be set.
-        if nb_device.name is None:
-            return str(nb_device).translate(NetworkDevice._host_translations)
-        else:
-            return nb_device.name.translate(NetworkDevice._host_translations)
+        raw_name = str(nb_device) if nb_device.name is None else nb_device.name
+        return NetworkDevice._host_disallowed_chars.sub('_', raw_name)
 
     def _set_basics(self):
         """
         Sets basic information like IP address.
         """
+        # Prefer IPv4 when requested and available, even if Netbox itself
+        # considers the device's primary_ip to be its IPv6 address.
+        if prefer_ipv4 and self.nb.primary_ip4:
+            primary_ip = self.nb.primary_ip4
+        else:
+            primary_ip = self.nb.primary_ip
+
         # Return error if device does not have primary IP.
-        if self.nb.primary_ip:
-            self.cidr = self.nb.primary_ip.address
+        if primary_ip:
+            self.cidr = primary_ip.address
             self.ip = self.cidr.split("/")[0]
         else:
             e = f"Device {self.name}: no primary IP."
@@ -699,6 +712,9 @@ def main():
     utils.setup_logging(logger, arguments,'sync')
 
     config = utils.fetch_sync_config()
+
+    global prefer_ipv4
+    prefer_ipv4 = config['NETBOX_PREFER_IPV4']
 
     # Connect to netbox & zabbix
     zabbix = utils.connect_zabbix(config)

@@ -29,6 +29,7 @@ And this field for the Zabbix template
 | NETBOX_HOST | https://netbox.local | Base URL to access netbox web interface, is a full URL and can include a path. |
 | NETBOX_TOKEN |   | Token to login to the netbox API with |
 | NETBOX_ROLE_IGNORE | patch-panel,media-converter | A comma-separated list of device role slugs of device roles that should be ignored, usually because they are unmanaged devices |
+| NETBOX_PREFER_IPV4 | true | Optional, default false (unchanged behavior - whatever Netbox itself considers `primary_ip`). Set to `true`/`1`/`yes` to use a device's IPv4 primary address for monitoring even when Netbox's `primary_ip` resolved to IPv6. |
 | ZABBIX_HOST | https://zabbix.local/zabbix | Base URL to access zabbix web interface, is a full URL and can include a path. |
 | ZABBIX_USER |   | Username to login to zabbix with |
 | ZABBIX_PASS |   | Password to login to zabbix with |
