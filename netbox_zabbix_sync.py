@@ -31,6 +31,15 @@ CF = {
 zabbix_device_removal = ["Decommissioning", "Inventory"]
 zabbix_device_disable = ["Offline", "Planned", "Staged", "Failed"]
 
+# "External Links" Zabbix dashboard: one row per circuit provider, one
+# classic-graph widget per circuit whose Netbox circuit termination has
+# been linked to a device interface. Grid is 72 units wide (Zabbix 7.x);
+# 4 columns comfortably covers today's provider circuit counts.
+EXTERNAL_LINKS_DASHBOARD_NAME = "External Links"
+EXTERNAL_LINKS_GRID_WIDTH = 72
+EXTERNAL_LINKS_WIDGET_WIDTH = 18
+EXTERNAL_LINKS_WIDGET_HEIGHT = 5
+
 # Set by main() from NETBOX_PREFER_IPV4 in .env. False (default) keeps
 # today's behavior unchanged - whatever Netbox itself considers
 # primary_ip. True uses a device's IPv4 primary address even when
@@ -703,6 +712,145 @@ class ZabbixInterface:
                 custom_fields['snmp_version']
 
 
+def _circuit_interface_device(nb, circuit):
+    """Return the (interface, device) Netbox objects for whichever side
+    of a circuit terminates on a device interface.
+
+    Returns None if neither termination_a nor termination_z has been
+    linked to an interface yet (e.g. it's still linked to a Location or
+    Site) - that's left for someone to go fix in Netbox, not inferred.
+    """
+    for term in (circuit.termination_a, circuit.termination_z):
+        if term is None or term.termination_type != 'dcim.interface':
+            continue
+        interface = nb.dcim.interfaces.get(term.termination.id)
+        device = nb.dcim.devices.get(interface.device.id)
+        return interface, device
+    return None
+
+
+def _zabbix_traffic_graph_id(zabbix, hostid, ifname):
+    """Find the standard per-interface 'Interface <name>(...): Network
+    traffic' graph Zabbix auto-creates via LLD for a synced host.
+
+    Returns the graphid, or None if no such graph exists yet (host not
+    yet discovered, or the interface name doesn't match).
+    """
+    graphs = zabbix.graph.get(
+        hostids=[hostid],
+        output=['graphid', 'name'],
+        search={'name': f"Interface {ifname}("},
+        startSearch=True,
+    )
+    if not graphs:
+        return None
+    return graphs[0]['graphid']
+
+
+def _external_links_widgets(nb, zabbix, provider_ignore_prefixes):
+    """Build the Zabbix dashboard widget list for the External Links
+    dashboard: one row (fixed y) per circuit provider, laid out left to
+    right, wrapping within the same row block if a provider ever has
+    more circuits than fit the grid width.
+
+    Providers whose name starts with any of provider_ignore_prefixes
+    (our own downstream circuits) are left off entirely. Circuits without
+    an interface-side termination, or whose device has no Zabbix host
+    yet, or whose interface has no traffic graph yet, are silently
+    skipped - each such gap is something to go fix in Netbox/Zabbix, not
+    something to guess around here.
+    """
+    providers = {}
+    for circuit in nb.circuits.circuits.all():
+        provider_name = circuit.provider.name
+        if any(provider_name.startswith(p) for p in provider_ignore_prefixes):
+            continue
+
+        resolved = _circuit_interface_device(nb, circuit)
+        if resolved is None:
+            logger.debug(
+                f"External links: circuit {circuit.cid} ({provider_name}) "
+                "has no interface-side termination yet, skipping."
+            )
+            continue
+        interface, device = resolved
+
+        hostid = device.custom_fields.get(CF['HOSTID'])
+        if not hostid:
+            logger.warning(
+                f"External links: circuit {circuit.cid} interface "
+                f"{interface.name} is on device {device.name}, which has "
+                "no Zabbix host yet, skipping."
+            )
+            continue
+
+        graphid = _zabbix_traffic_graph_id(zabbix, hostid, interface.name)
+        if graphid is None:
+            logger.warning(
+                f"External links: no Zabbix traffic graph found for "
+                f"{device.name}/{interface.name} (circuit {circuit.cid}), "
+                "skipping."
+            )
+            continue
+
+        providers.setdefault(provider_name, []).append(
+            (circuit, device, interface, graphid)
+        )
+
+    per_row = max(1, EXTERNAL_LINKS_GRID_WIDTH // EXTERNAL_LINKS_WIDGET_WIDTH)
+    widgets = []
+    y = 0
+    for provider_name in sorted(providers):
+        entries = providers[provider_name]
+        rows_used = 0
+        for idx, (circuit, device, interface, graphid) in enumerate(entries):
+            row, col = divmod(idx, per_row)
+            rows_used = max(rows_used, row + 1)
+            widgets.append({
+                'type': 'graph',
+                'name': f"{provider_name}: {circuit.cid} ({device.name} {interface.name})",
+                'x': col * EXTERNAL_LINKS_WIDGET_WIDTH,
+                'y': y + row * EXTERNAL_LINKS_WIDGET_HEIGHT,
+                'width': EXTERNAL_LINKS_WIDGET_WIDTH,
+                'height': EXTERNAL_LINKS_WIDGET_HEIGHT,
+                'fields': [
+                    {'type': 0, 'name': 'source_type', 'value': '0'},
+                    {'type': 6, 'name': 'graphid.0', 'value': str(graphid)},
+                ],
+            })
+        y += rows_used * EXTERNAL_LINKS_WIDGET_HEIGHT
+
+    return widgets, providers
+
+
+def sync_external_links_dashboard(nb, zabbix, provider_ignore_prefixes):
+    """Create or update the 'External Links' Zabbix dashboard.
+    """
+    widgets, providers = _external_links_widgets(nb, zabbix, provider_ignore_prefixes)
+    pages = [{'name': '', 'widgets': widgets}]
+
+    existing = zabbix.dashboard.get(
+        filter={'name': EXTERNAL_LINKS_DASHBOARD_NAME}, output=['dashboardid'],
+    )
+    if existing:
+        zabbix.dashboard.update(
+            dashboardid=existing[0]['dashboardid'],
+            pages=pages,
+        )
+        action = "Updated"
+    else:
+        zabbix.dashboard.create(
+            name=EXTERNAL_LINKS_DASHBOARD_NAME,
+            pages=pages,
+            private=0,
+        )
+        action = "Created"
+    logger.info(
+        f"{action} '{EXTERNAL_LINKS_DASHBOARD_NAME}' dashboard with "
+        f"{len(widgets)} graph(s) across {len(providers)} provider(s)."
+    )
+
+
 def main():
     """Run the sync process.
     """
@@ -801,6 +949,15 @@ def main():
                 )
         except exceptions.SyncError as exc:
             logger.error(f"Skipping device {nb_device.name}: {exc}")
+
+    try:
+        sync_external_links_dashboard(
+            netbox, zabbix, config['EXTERNAL_LINKS_PROVIDER_IGNORE']
+        )
+    except pyzabbix.ZabbixAPIException as exc:
+        logger.error(f"Failed to sync External Links dashboard: {exc}")
+        logger.error(traceback.format_exc())
+
     logger.info("Done")
 
 if __name__ == "__main__":

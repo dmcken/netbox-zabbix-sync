@@ -156,6 +156,7 @@ def fetch_sync_config():
         "NETBOX_TOKEN",
         "NETBOX_ROLE_IGNORE",
         "NETBOX_PREFER_IPV4",
+        "EXTERNAL_LINKS_PROVIDER_IGNORE",
     ]
     for var in env_vars:
         config[var] = os.environ.get(var, None)
@@ -164,6 +165,16 @@ def fetch_sync_config():
     if config["NETBOX_ROLE_IGNORE"] is not None:
         parts = config["NETBOX_ROLE_IGNORE"].split(',')
         config["NETBOX_ROLE_IGNORE"] = parts
+
+    # Provider name prefixes to leave off the "External Links" Zabbix
+    # dashboard (our own downstream circuits, not external ones).
+    # Defaults to "AirLink" when unset.
+    if config["EXTERNAL_LINKS_PROVIDER_IGNORE"] is None:
+        config["EXTERNAL_LINKS_PROVIDER_IGNORE"] = ["AirLink"]
+    else:
+        config["EXTERNAL_LINKS_PROVIDER_IGNORE"] = [
+            p.strip() for p in config["EXTERNAL_LINKS_PROVIDER_IGNORE"].split(',')
+        ]
 
     # Default False: unchanged behavior (whatever Netbox itself considers
     # primary_ip). Only "1"/"true"/"yes" (case-insensitive) opt in.
