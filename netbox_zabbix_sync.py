@@ -712,21 +712,34 @@ class ZabbixInterface:
                 custom_fields['snmp_version']
 
 
-def _circuit_interface_device(nb, circuit):
-    """Return the (interface, device) Netbox objects for whichever side
-    of a circuit terminates on a device interface.
+def _circuit_interface_devices(nb, circuit):
+    """Return the (interface, device) Netbox objects for every side of a
+    circuit that terminates on a device interface (usually one, but a
+    cross-connect circuit can have both A and Z land on real devices).
 
-    Returns None if neither termination_a nor termination_z has been
-    linked to an interface yet (e.g. it's still linked to a Location or
-    Site) - that's left for someone to go fix in Netbox, not inferred.
+    A CircuitTermination's own `termination` field is where the circuit
+    conceptually lands (a Site/Location/ProviderNetwork) - it is never an
+    interface. The actual physical connection, if any, is the Cable
+    attached to that termination, whose far end is exposed via
+    `link_peers`/`link_peers_type` (this also transparently resolves
+    through passive patch-panel front/rear ports to the real interface
+    on the other side).
+
+    Returns an empty list if neither termination_a nor termination_z has
+    a cable ending on a device interface yet - that's left for someone
+    to go fix in Netbox, not inferred.
     """
+    candidates = []
     for term in (circuit.termination_a, circuit.termination_z):
-        if term is None or term.termination_type != 'dcim.interface':
+        if term is None:
             continue
-        interface = nb.dcim.interfaces.get(term.termination.id)
+        ct = nb.circuits.circuit_terminations.get(term.id)
+        if not ct.cable or ct.link_peers_type != 'dcim.interface' or not ct.link_peers:
+            continue
+        interface = ct.link_peers[0]
         device = nb.dcim.devices.get(interface.device.id)
-        return interface, device
-    return None
+        candidates.append((interface, device))
+    return candidates
 
 
 def _zabbix_traffic_graph_id(zabbix, hostid, ifname):
@@ -766,32 +779,43 @@ def _external_links_widgets(nb, zabbix, provider_ignore_prefixes):
         if any(provider_name.startswith(p) for p in provider_ignore_prefixes):
             continue
 
-        resolved = _circuit_interface_device(nb, circuit)
-        if resolved is None:
+        candidates = _circuit_interface_devices(nb, circuit)
+        if not candidates:
             logger.debug(
                 f"External links: circuit {circuit.cid} ({provider_name}) "
                 "has no interface-side termination yet, skipping."
             )
             continue
-        interface, device = resolved
 
-        hostid = device.custom_fields.get(CF['HOSTID'])
-        if not hostid:
+        # Try every device-interface side of the circuit (a cross-connect
+        # can have a real device on both A and Z) and use the first one
+        # that actually has a Zabbix host and traffic graph.
+        match = None
+        skip_reasons = []
+        for interface, device in candidates:
+            hostid = device.custom_fields.get(CF['HOSTID'])
+            if not hostid:
+                skip_reasons.append(
+                    f"{device.name}/{interface.name} has no Zabbix host yet"
+                )
+                continue
+            graphid = _zabbix_traffic_graph_id(zabbix, hostid, interface.name)
+            if graphid is None:
+                skip_reasons.append(
+                    f"no Zabbix traffic graph found for "
+                    f"{device.name}/{interface.name}"
+                )
+                continue
+            match = (device, interface, graphid)
+            break
+
+        if match is None:
             logger.warning(
-                f"External links: circuit {circuit.cid} interface "
-                f"{interface.name} is on device {device.name}, which has "
-                "no Zabbix host yet, skipping."
+                f"External links: circuit {circuit.cid} ({provider_name}) "
+                f"skipped, {'; '.join(skip_reasons)}."
             )
             continue
-
-        graphid = _zabbix_traffic_graph_id(zabbix, hostid, interface.name)
-        if graphid is None:
-            logger.warning(
-                f"External links: no Zabbix traffic graph found for "
-                f"{device.name}/{interface.name} (circuit {circuit.cid}), "
-                "skipping."
-            )
-            continue
+        device, interface, graphid = match
 
         providers.setdefault(provider_name, []).append(
             (circuit, device, interface, graphid)
