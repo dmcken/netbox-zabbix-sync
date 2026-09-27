@@ -344,24 +344,27 @@ def get_or_create_map(zabbix, name: str, width: int, height: int) -> str:
 
 
 def find_hub_host(host_names, site_code: str):
-    """Finds a site's core/edge router, used as its per-site map's hub.
+    """Finds a site's router to use as its per-site map's hub.
 
-    Prefers an exact '<CODE>-CE1'; falls back to the lowest-numbered
-    '<CODE>-CE<N>' if CE1 doesn't exist (some sites have been renumbered
-    and skip it). Anchored to the site code so an unrelated host that
-    merely ends in '-CE1' (e.g. a decommissioned device from another
-    site) is never mistaken for this site's router. Returns None if the
-    site has no CE-series router at all - callers must not guess at one.
+    Prefers the lowest-numbered '<CODE>-IE<N>' (the site's internet-edge
+    router - larger sites' natural center); falls back to the
+    lowest-numbered '<CODE>-CE<N>' for sites with no IE. Anchored to the
+    site code so an unrelated host that merely ends in '-IE1'/'-CE1'
+    (e.g. a decommissioned device from another site) is never mistaken
+    for this site's router. Returns None if the site has neither series
+    - callers must not guess at one.
     """
-    pattern = re.compile(rf'^{re.escape(site_code)}-CE(\d+)$', re.IGNORECASE)
-    candidates = []
-    for name in host_names:
-        match = pattern.match(name)
-        if match:
-            candidates.append((int(match.group(1)), name))
-    if not candidates:
-        return None
-    return min(candidates)[1]
+    host_names = list(host_names)
+    for series in ('IE', 'CE'):
+        pattern = re.compile(rf'^{re.escape(site_code)}-{series}(\d+)$', re.IGNORECASE)
+        candidates = []
+        for name in host_names:
+            match = pattern.match(name)
+            if match:
+                candidates.append((int(match.group(1)), name))
+        if candidates:
+            return min(candidates)[1]
+    return None
 
 
 def site_map_dimensions(host_count: int) -> tuple:
