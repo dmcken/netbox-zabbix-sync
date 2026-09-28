@@ -6,11 +6,13 @@ Internet cloud node connected to any site with a BGP/DIA circuit
 terminating there, computes a layout that pulls that cloud and
 'core-site'-tagged sites toward the center, annotates each backhaul link
 with live capacity/utilization pulled from Zabbix, and writes the result
-into a dedicated overview map. Each site element on that map is also a
-clickable drill-down link into a dedicated per-site map (auto-created the
-same way), laid out with that site's core/edge router at the center and
-its other Zabbix-monitored hosts around it. Never touches the hand-built
-'WISP - Overview' map.
+into a dedicated overview map. Also builds a dedicated per-location map
+for every Netbox location with Zabbix-monitored devices, laid out with
+that location's internet-edge (or, failing that, customer-edge) router
+at the center and its other hosts around it, connected by real Netbox
+cables. A site element on the overview map whose backhaul radio's
+location has such a map becomes a clickable drill-down link into it.
+Never touches the hand-built 'WISP - Overview' map.
 """
 
 # System imports
@@ -21,6 +23,7 @@ import time
 
 # External imports
 import networkx as nx
+import pynetbox
 import pyzabbix
 
 # Local imports
@@ -39,6 +42,15 @@ SITE_MAP_PX_PER_HOST = 30       # Roughly how much ring circumference a host nee
 SITE_MAP_ASPECT = 0.75          # height = width * this.
 
 CORE_TAG = "core-site"
+
+# Device roles (by slug) that actually represent network topology for a
+# per-location map. A location's Zabbix-monitored devices are mostly
+# PDUs (monitored for power, not connectivity) with a handful of real
+# routers/switches/firewalls mixed in; without this filter a map like
+# 'DC1' ends up as ~75 nodes, 70% of them PDUs, rather than the ~20
+# actual network devices worth drawing.
+LOCATION_MAP_ROLE_SLUGS = {'rtr', 'rtr-dh-access', 'switch', 'firewall', 'backhaul', 'dh-access'}
+
 SITE_ICONID = "124"       # Router_(48).
 INTERNET_ICONID = "3"     # Cloud_(48) - kept distinct from regular sites.
 STALE_SECONDS = 15 * 60
@@ -70,7 +82,13 @@ def build_graph(netbox) -> nx.Graph:
     resolve the corresponding Zabbix hosts.
     """
     graph = nx.Graph()
-    core_slugs = {site.slug for site in netbox.dcim.sites.filter(tag=CORE_TAG)}
+    try:
+        core_slugs = {site.slug for site in netbox.dcim.sites.filter(tag=CORE_TAG)}
+    except pynetbox.RequestError:
+        # The 'core-site' tag doesn't exist in Netbox yet - treat that the
+        # same as it existing but being applied to nothing (see the
+        # warning already logged below for that case).
+        core_slugs = set()
 
     for link in netbox.wireless.wireless_links.all():
         device_a = link.interface_a.device
@@ -343,23 +361,26 @@ def get_or_create_map(zabbix, name: str, width: int, height: int) -> str:
     return created['sysmapids'][0]
 
 
-def find_hub_host(host_names, site_code: str):
-    """Finds a site's router to use as its per-site map's hub.
+def find_hub_host(host_names):
+    """Finds the router to use as a per-location map's hub, among the
+    hosts already scoped to that one location.
 
-    Prefers the lowest-numbered '<CODE>-IE<N>' (the site's internet-edge
-    router - larger sites' natural center); falls back to the
-    lowest-numbered '<CODE>-CE<N>' for sites with no IE. Anchored to the
-    site code so an unrelated host that merely ends in '-IE1'/'-CE1'
-    (e.g. a decommissioned device from another site) is never mistaken
-    for this site's router. Returns None if the site has neither series
-    - callers must not guess at one.
+    Prefers the lowest-numbered '*-IE<N>' (internet-edge router - larger
+    locations' natural center); falls back to the lowest-numbered
+    '*-CE<N>' for locations with no IE. Unlike the old per-site version,
+    this isn't anchored to a location code prefix: a device's name
+    doesn't reliably start with its own location's code (e.g.
+    'DH-BLC-CE1' physically sits in location 'STC'), so candidates are
+    trusted purely because the caller already scoped host_names to one
+    location. Returns None if the location has neither series -
+    callers must not guess at one.
     """
     host_names = list(host_names)
     for series in ('IE', 'CE'):
-        pattern = re.compile(rf'^{re.escape(site_code)}-{series}(\d+)$', re.IGNORECASE)
+        pattern = re.compile(rf'-{series}(\d+)$', re.IGNORECASE)
         candidates = []
         for name in host_names:
-            match = pattern.match(name)
+            match = pattern.search(name)
             if match:
                 candidates.append((int(match.group(1)), name))
         if candidates:
@@ -378,25 +399,19 @@ def site_map_dimensions(host_count: int) -> tuple:
     return width, int(width * SITE_MAP_ASPECT)
 
 
-def resolve_site_topology(netbox, site_slug: str, hosts: list) -> list:
-    """Returns real device-to-device links within a site, from Netbox
+def resolve_location_topology(netbox, device_to_hostid: dict) -> list:
+    """Returns real device-to-device links within a location, from Netbox
     cable connections only - never inferred or assumed.
 
-    Restricted to device pairs that both have a Zabbix host already on
-    this site's map (the passed-in `hosts`), so a cable to an unsynced
-    or out-of-site device is silently skipped rather than drawn as a
+    `device_to_hostid` ({netbox device id: zabbix hostid}) is already
+    scoped to one location's Zabbix-monitored devices by the caller, so a
+    cable to a device outside that set (a different location, or one
+    with no Zabbix host) is silently skipped rather than drawn as a
     dangling edge. Each entry is
     (hostid_a, hostid_b, interface_name_a, interface_name_b) - the exact
     interface names are kept so bandwidth can later be resolved from the
     precise Zabbix SNMP item for that interface, not guessed at.
     """
-    valid_hostids = {h['hostid'] for h in hosts}
-    device_to_hostid = {}
-    for device in netbox.dcim.devices.filter(site=site_slug):
-        zbx_id = device.custom_fields.get('zabbix_hostid')
-        if zbx_id is not None and str(zbx_id) in valid_hostids:
-            device_to_hostid[device.id] = str(zbx_id)
-
     if not device_to_hostid:
         return []
 
@@ -461,20 +476,20 @@ def resolve_interface_metrics(zabbix, hostid: str, interface_name: str) -> dict:
     return {'utilization_pct': pct, 'label': label}
 
 
-def build_site_map_content(
-    zabbix, hosts: list, topology_links: list, site_code: str,
+def build_location_map_content(
+    zabbix, hosts: list, topology_links: list,
     width: int, height: int, margin=MARGIN,
 ):
-    """Builds the selements/links for one site's map.
+    """Builds the selements/links for one location's map.
 
-    Layout still centers the site's core/edge router (see find_hub_host)
-    for readability, but links are drawn only for real Netbox cable
-    connections between the site's hosts (topology_links) - a host with
-    no such connection is simply left unconnected, rather than wired
-    into a guessed-at star.
+    Layout still centers the location's core/edge router (see
+    find_hub_host) for readability, but links are drawn only for real
+    Netbox cable connections between the location's hosts
+    (topology_links) - a host with no such connection is simply left
+    unconnected, rather than wired into a guessed-at star.
     """
     host_names = {h['hostid']: h['host'] for h in hosts}
-    hub_name = find_hub_host(host_names.values(), site_code)
+    hub_name = find_hub_host(host_names.values())
     hub_id = next((hid for hid, name in host_names.items() if name == hub_name), None)
     others = [hid for hid in host_names if hid != hub_id]
 
@@ -519,55 +534,111 @@ def build_site_map_content(
     return selements, links
 
 
-def generate_site_map(zabbix, netbox, site_slug: str, site_name: str):
-    """Creates/updates the per-site map for one site. Returns its
-    sysmapid, or None if the site has no Zabbix hostgroup/hosts to show
-    (e.g. it's brand new in Netbox and hasn't synced any devices yet).
+def generate_location_map(zabbix, netbox, location, device_to_hostid: dict):
+    """Creates/updates the per-location map for one Netbox location.
+    Returns its sysmapid, or None if none of the location's devices have
+    a live Zabbix host to show.
     """
-    group = zabbix.hostgroup.get(filter={'name': f'Site - {site_name}'}, output=['groupid'])
-    if not group:
-        logger.warning(f"No Zabbix hostgroup 'Site - {site_name}'; skipping its site map.")
-        return None
-
-    hosts = zabbix.host.get(groupids=[group[0]['groupid']], output=['hostid', 'host'])
+    hosts = zabbix.host.get(
+        hostids=list(device_to_hostid.values()), output=['hostid', 'host'],
+    )
     if not hosts:
-        logger.warning(f"No Zabbix hosts in group 'Site - {site_name}'; skipping its site map.")
+        logger.warning(
+            f"None of location {location.name!r}'s devices have a live "
+            "Zabbix host; skipping its map."
+        )
         return None
 
-    site_code = site_name.rsplit(' - ', 1)[-1]
-    topology_links = resolve_site_topology(netbox, site_slug, hosts)
+    # A device's zabbix_hostid custom field can go stale (host deleted in
+    # Zabbix); keep only the ones Zabbix actually returned, so a link
+    # can't reference a hostid build_location_map_content never sees.
+    live_hostids = {h['hostid'] for h in hosts}
+    device_to_hostid = {
+        dev_id: hostid for dev_id, hostid in device_to_hostid.items()
+        if hostid in live_hostids
+    }
 
+    topology_links = resolve_location_topology(netbox, device_to_hostid)
+
+    map_name = f"Location - {location.name}"
     width, height = site_map_dimensions(len(hosts))
-    sysmapid = get_or_create_map(zabbix, site_name, width, height)
+    sysmapid = get_or_create_map(zabbix, map_name, width, height)
 
-    selements, links = build_site_map_content(zabbix, hosts, topology_links, site_code, width, height)
+    selements, links = build_location_map_content(zabbix, hosts, topology_links, width, height)
     try:
         zabbix.map.update(sysmapid=sysmapid, selements=selements, links=links)
     except pyzabbix.ZabbixAPIException as exc:
-        err_msg = f"Zabbix returned the following error updating site map '{site_name}': {exc}."
+        err_msg = f"Zabbix returned the following error updating location map '{map_name}': {exc}."
         logger.error(err_msg)
         raise exceptions.MapUpdateError(err_msg) from exc
 
     logger.info(
-        f"Updated site map '{site_name}' with {len(selements)} hosts "
+        f"Updated location map '{map_name}' with {len(selements)} hosts "
         f"and {len(links)} real cable links."
     )
     return sysmapid
 
 
-def build_site_maps(zabbix, netbox, graph: nx.Graph) -> dict:
-    """Creates/updates a per-site map for every real site node in the
-    graph (skipping the synthetic Internet node). Returns
-    {site_slug: sysmapid} for sites whose map was built successfully -
-    used to wire up the overview map's drill-down links.
+def build_location_maps(zabbix, netbox) -> dict:
+    """Creates/updates a per-location map for every Netbox location that
+    has at least one Zabbix-monitored device. Returns
+    {location_id: sysmapid} for locations whose map was built
+    successfully - used to wire up the overview map's drill-down links.
+
+    Devices are grouped by their own directly-assigned location only
+    (never a parent/ancestor location), restricted to network-topology
+    device roles (LOCATION_MAP_ROLE_SLUGS - a PDU or patch panel would
+    otherwise bury the handful of real routers/switches on a busy
+    location's map), and matched to Zabbix purely via each device's own
+    zabbix_hostid custom field - not by hostgroup name, since Zabbix
+    hostgroup naming doesn't reliably line up with Netbox location names
+    (e.g. 'DH-BLC-CE1' sits in location 'STC', not 'BLC').
+    """
+    devices_by_location = {}
+    for device in netbox.dcim.devices.all():
+        if device.location is None:
+            continue
+        if device.role.slug not in LOCATION_MAP_ROLE_SLUGS:
+            continue
+        hostid = device.custom_fields.get('zabbix_hostid')
+        if not hostid:
+            continue
+        devices_by_location.setdefault(device.location.id, {})[device.id] = str(hostid)
+
+    location_map_ids = {}
+    for location in netbox.dcim.locations.all():
+        device_to_hostid = devices_by_location.get(location.id)
+        if not device_to_hostid:
+            continue
+        sysmapid = generate_location_map(zabbix, netbox, location, device_to_hostid)
+        if sysmapid:
+            location_map_ids[location.id] = sysmapid
+    return location_map_ids
+
+
+def resolve_site_drilldown_maps(netbox, graph: nx.Graph, location_map_ids: dict) -> dict:
+    """Maps each overview-map site node to the per-location map it should
+    drill down into: the location of whichever device anchors that
+    site's backhaul radio link.
+
+    A site reached only via an Internet circuit (no wireless backhaul
+    edge in the graph) has no such device to resolve from, so it's left
+    out entirely - its overview node stays a plain image instead of a
+    drill-down link, same as a location with no map at all.
     """
     site_map_ids = {}
-    for slug in graph.nodes():
-        if slug == INTERNET_NODE:
+    for site_a, site_b, data in graph.edges(data=True):
+        if data.get('is_internet_link'):
             continue
-        sysmapid = generate_site_map(zabbix, netbox, slug, graph.nodes[slug]['name'])
-        if sysmapid:
-            site_map_ids[slug] = sysmapid
+        for slug, device_name in ((site_a, data['device_a']), (site_b, data['device_b'])):
+            if slug in site_map_ids:
+                continue
+            devices = list(netbox.dcim.devices.filter(name=device_name))
+            if not devices or devices[0].location is None:
+                continue
+            sysmapid = location_map_ids.get(devices[0].location.id)
+            if sysmapid:
+                site_map_ids[slug] = sysmapid
     return site_map_ids
 
 
@@ -654,7 +725,8 @@ def main():
         f"{graph.number_of_edges()} links."
     )
 
-    site_map_ids = build_site_maps(zabbix, netbox, graph)
+    location_map_ids = build_location_maps(zabbix, netbox)
+    site_map_ids = resolve_site_drilldown_maps(netbox, graph, location_map_ids)
 
     target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, TARGET_WIDTH, TARGET_HEIGHT)
     positions = compute_layout(graph, TARGET_WIDTH, TARGET_HEIGHT)
