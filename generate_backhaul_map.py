@@ -74,7 +74,20 @@ INTERNET_CIRCUIT_TYPES = {"bgp", "dia"}
 _DEVICE_NAME_RE = re.compile(r'^BH_([A-Za-z0-9]+)>([A-Za-z0-9]+)')
 
 
-def build_graph(netbox) -> nx.Graph:
+def resolve_core_site_slugs(netbox) -> set:
+    """Returns the slugs of every site tagged CORE_TAG.
+
+    Tolerates the tag not existing in Netbox yet (treated the same as it
+    existing but being applied to nothing) so a fresh Netbox instance
+    doesn't crash the whole script over missing tag metadata.
+    """
+    try:
+        return {site.slug for site in netbox.dcim.sites.filter(tag=CORE_TAG)}
+    except pynetbox.RequestError:
+        return set()
+
+
+def build_graph(netbox, core_slugs: set) -> nx.Graph:
     """Builds an undirected graph of sites connected by backhaul links.
 
     Nodes are keyed by Netbox site slug, carrying 'name' and 'is_core'
@@ -82,14 +95,6 @@ def build_graph(netbox) -> nx.Graph:
     resolve the corresponding Zabbix hosts.
     """
     graph = nx.Graph()
-    try:
-        core_slugs = {site.slug for site in netbox.dcim.sites.filter(tag=CORE_TAG)}
-    except pynetbox.RequestError:
-        # The 'core-site' tag doesn't exist in Netbox yet - treat that the
-        # same as it existing but being applied to nothing (see the
-        # warning already logged below for that case).
-        core_slugs = set()
-
     for link in netbox.wireless.wireless_links.all():
         device_a = link.interface_a.device
         device_b = link.interface_b.device
@@ -151,7 +156,7 @@ def resolve_internet_circuits(netbox) -> dict:
     return sites
 
 
-def add_internet_node(graph: nx.Graph, netbox) -> None:
+def add_internet_node(graph: nx.Graph, netbox, core_slugs: set) -> None:
     """Adds a synthetic Internet cloud node to the graph, in place.
 
     Connects it to every site with a BGP/DIA circuit terminating there
@@ -159,7 +164,10 @@ def add_internet_node(graph: nx.Graph, netbox) -> None:
     site not already in the backhaul graph (e.g. a datacenter with no
     wireless links of its own) is still added, so the map shows the
     actual uplink point even if it's otherwise disconnected from the
-    wireless mesh.
+    wireless mesh - and still marked core/not per core_slugs like any
+    other site, e.g. a peering/transit-only site such as IMDC that has
+    no wireless backhaul link of its own to have picked it up via
+    build_graph() instead.
     """
     internet_sites = resolve_internet_circuits(netbox)
     if not internet_sites:
@@ -172,7 +180,7 @@ def add_internet_node(graph: nx.Graph, netbox) -> None:
     graph.add_node(INTERNET_NODE, name="Internet", is_core=False)
     for slug, info in internet_sites.items():
         if slug not in graph:
-            graph.add_node(slug, name=info['name'], is_core=False)
+            graph.add_node(slug, name=info['name'], is_core=slug in core_slugs)
         graph.add_edge(
             slug, INTERNET_NODE,
             is_internet_link=True,
@@ -718,8 +726,9 @@ def main():
     zabbix = utils.connect_zabbix(config)
     netbox = utils.connect_netbox(config)
 
-    graph = build_graph(netbox)
-    add_internet_node(graph, netbox)
+    core_slugs = resolve_core_site_slugs(netbox)
+    graph = build_graph(netbox, core_slugs)
+    add_internet_node(graph, netbox, core_slugs)
     logger.info(
         f"Backhaul graph: {graph.number_of_nodes()} sites, "
         f"{graph.number_of_edges()} links."
