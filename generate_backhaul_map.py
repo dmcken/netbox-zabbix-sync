@@ -45,11 +45,19 @@ CORE_TAG = "core-site"
 
 # Device roles (by slug) that actually represent network topology for a
 # per-location map. A location's Zabbix-monitored devices are mostly
-# PDUs (monitored for power, not connectivity) with a handful of real
-# routers/switches/firewalls mixed in; without this filter a map like
-# 'DC1' ends up as ~75 nodes, 70% of them PDUs, rather than the ~20
-# actual network devices worth drawing.
-LOCATION_MAP_ROLE_SLUGS = {'rtr', 'rtr-dh-access', 'switch', 'firewall', 'backhaul', 'dh-access'}
+# UPS/patch-panel/compute/CPE gear (monitored for power or as an
+# endpoint, not connectivity) with a handful of real routers/switches
+# mixed in; without this filter a map ends up mostly non-network nodes
+# rather than the actual devices worth drawing.
+#
+# These are this Netbox instance's real dcim.device-roles slugs (see
+# /api/dcim/device-roles/) - router, switch, switch-poe and
+# access-switch cover the core/edge routers and switches, backhaul
+# covers the inter-site radios, AP covers tower-mounted sector/access
+# radios. Deliberately excludes ups, patch-panel, cpe-router, cpe-dish,
+# server(-hypervisor), nvr and the virtualization roles - customer/
+# power/compute endpoints, not network topology.
+LOCATION_MAP_ROLE_SLUGS = {'router', 'switch', 'switch-poe', 'access-switch', 'backhaul', 'AP'}
 
 SITE_ICONID = "124"       # Router_(48).
 INTERNET_ICONID = "3"     # Cloud_(48) - kept distinct from regular sites.
