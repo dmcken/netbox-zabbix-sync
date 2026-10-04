@@ -65,8 +65,15 @@ class NetworkDevice:
     # contain arbitrary punctuation (e.g. a '/' in a street address).
     _host_disallowed_chars = re.compile(r'[^A-Za-z0-9 ._-]')
 
-    def __init__(self, nb_device, zabbix, nb_journal_class, journal=None):
+    def __init__(self, nb_device, zabbix, nb_journal_class, journal=None,
+                 site_gps_map=None):
         '''NetworkDevice Constructor.
+
+        site_gps_map: optional {site_id: (latitude, longitude)}, built
+        once in main() from the full Netbox sites list. Needed because
+        the device list endpoint's nested `site` is a brief serializer
+        (id/url/name/slug/display only) with no coordinates of its own
+        -- see _set_basics().
         '''
         self.nb = nb_device
         self.id = nb_device.id
@@ -82,6 +89,7 @@ class NetworkDevice:
         self.zabbix_state = 0
         self.journal = journal
         self.nb_journals = nb_journal_class
+        self.site_gps_map = site_gps_map or {}
         self._set_basics()
         self.set_host_groups()
 
@@ -139,9 +147,13 @@ class NetworkDevice:
             raise exceptions.SyncInventoryError(e)
 
         # Site GPS coordinates, used to populate the Zabbix Geomap widget.
-        # Left unset (None) if the Netbox site has no coordinates.
-        self.site_lat = utils.rgetattr(self.nb, 'site.latitude', None)
-        self.site_lon = utils.rgetattr(self.nb, 'site.longitude', None)
+        # self.nb.site is the brief nested serializer the device list
+        # endpoint returns (id/url/name/slug/display only) -- it never
+        # carries latitude/longitude itself, so these are resolved via
+        # site_gps_map (site_id -> (lat, lon)) instead. Left unset
+        # (None) if the site has no coordinates, or isn't in the map.
+        site_id = utils.rgetattr(self.nb, 'site.id', None)
+        self.site_lat, self.site_lon = self.site_gps_map.get(site_id, (None, None))
 
     def _geo_inventory(self) -> dict:
         """Returns Zabbix host.update/create kwargs for the site's GPS
@@ -902,6 +914,16 @@ def main():
     netbox_devices  = netbox.dcim.devices.all()
     netbox_journals = netbox.extras.journal_entries
 
+    # Full site list, to resolve each device's GPS coordinates for the
+    # Zabbix Geomap widget -- the device list endpoint's nested `site`
+    # is brief and carries no latitude/longitude (see
+    # NetworkDevice._set_basics).
+    site_gps_map = {
+        site.id: (site.latitude, site.longitude)
+        for site in netbox.dcim.sites.all()
+        if site.latitude is not None and site.longitude is not None
+    }
+
     # Go through all Netbox devices
     for nb_device in netbox_devices:
         try:
@@ -915,7 +937,8 @@ def main():
                 nb_device,
                 zabbix,
                 netbox_journals,
-                arguments.journal
+                arguments.journal,
+                site_gps_map=site_gps_map,
             )
             # Checks if device is part of cluster.
             # Requires the cluster argument.
