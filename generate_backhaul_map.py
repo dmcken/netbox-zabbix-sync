@@ -39,6 +39,7 @@ TARGET_HEIGHT = 900
 SITE_MAP_MIN_SIZE = 700         # Canvas floor for a small site.
 SITE_MAP_MAX_SIZE = 2200        # Cap for a site with a lot of hosts (e.g. DAN).
 SITE_MAP_PX_PER_HOST = 30       # Roughly how much ring circumference a host needs.
+SITE_MAP_RING_SPACING = 250     # Minimum radius gap between two hop-depth rings.
 SITE_MAP_ASPECT = 0.75          # height = width * this.
 
 CORE_TAG = "core-site"
@@ -404,14 +405,22 @@ def find_hub_host(host_names):
     return None
 
 
-def site_map_dimensions(host_count: int) -> tuple:
+def site_map_dimensions(host_count: int, max_depth: int = 1) -> tuple:
     """Scales a site map's canvas with its host count, within sane bounds.
 
     A handful of hosts fit comfortably on a compact canvas; a site with
     dozens (e.g. a large tower) needs more room so icons/labels don't
     overlap, but is still capped rather than growing unbounded.
+
+    max_depth (see _hop_depths) widens this independently of host count
+    - a hub with a couple of downstream switches, each with only a
+    handful of their own devices, needs enough radius for every ring to
+    stay readable even though the total host count alone would fit a
+    much smaller single-ring canvas.
     """
     width = min(max(SITE_MAP_MIN_SIZE, host_count * SITE_MAP_PX_PER_HOST), SITE_MAP_MAX_SIZE)
+    min_width_for_rings = 2 * (max_depth * SITE_MAP_RING_SPACING + MARGIN)
+    width = min(max(width, min_width_for_rings), SITE_MAP_MAX_SIZE)
     return width, int(width * SITE_MAP_ASPECT)
 
 
@@ -492,6 +501,37 @@ def resolve_interface_metrics(zabbix, hostid: str, interface_name: str) -> dict:
     return {'utilization_pct': pct, 'label': label}
 
 
+def _hop_depths(hub_id, others: list, topology_links: list) -> dict:
+    """BFS hop-distance from hub_id to every reachable host, over the
+    real cable topology (topology_links) treated as an undirected
+    graph.
+
+    A host with no path back to the hub at all (an island - no cable
+    chain connects it, directly or indirectly) is simply absent from
+    the returned dict, rather than assigned a guessed-at depth - same
+    "don't guess" spirit as resolve_location_topology only ever
+    drawing real cable links. The caller decides how to place those.
+    """
+    adjacency = {hostid: set() for hostid in [hub_id, *others]}
+    for hostid_a, hostid_b, _iface_a, _iface_b in topology_links:
+        if hostid_a in adjacency and hostid_b in adjacency:
+            adjacency[hostid_a].add(hostid_b)
+            adjacency[hostid_b].add(hostid_a)
+
+    depths = {hub_id: 0}
+    frontier = [hub_id]
+    while frontier:
+        next_frontier = []
+        for hostid in frontier:
+            for neighbour in adjacency[hostid]:
+                if neighbour not in depths:
+                    depths[neighbour] = depths[hostid] + 1
+                    next_frontier.append(neighbour)
+        frontier = next_frontier
+
+    return {hostid: depths[hostid] for hostid in others if hostid in depths}
+
+
 def build_location_map_content(
     zabbix, hosts: list, topology_links: list,
     width: int, height: int, margin=MARGIN,
@@ -503,6 +543,14 @@ def build_location_map_content(
     Netbox cable connections between the location's hosts
     (topology_links) - a host with no such connection is simply left
     unconnected, rather than wired into a guessed-at star.
+
+    Hosts are grouped into concentric rings by their real cable
+    hop-distance from the hub (see _hop_depths), rather than one flat
+    ring for everyone - e.g. a tower's direct hub-fed devices sit on an
+    inner ring, with devices fed by one of those (a switch's own
+    downstream ports) pushed out to the next ring beyond them. A
+    location with no such multi-hop chain (every host one hop from the
+    hub) renders exactly as before - a single ring at outer_radius.
     """
     host_names = {h['hostid']: h['host'] for h in hosts}
     hub_name = find_hub_host(host_names.values())
@@ -515,7 +563,21 @@ def build_location_map_content(
     positions = {}
     if hub_id:
         positions[hub_id] = (center_x, center_y)
-        positions.update(_ring_positions(others, center_x, center_y, outer_radius))
+        depths = _hop_depths(hub_id, others, topology_links)
+        max_depth = max(depths.values(), default=1) if depths else 1
+        rings = {}
+        for hostid, depth in depths.items():
+            rings.setdefault(depth, []).append(hostid)
+        # A host with no path back to the hub at all shares the
+        # outermost real ring rather than getting one of its own -
+        # inventing a further-out ring just for these would otherwise
+        # pull every real ring inward to make room for it.
+        unreached = [hostid for hostid in others if hostid not in depths]
+        if unreached:
+            rings.setdefault(max_depth, []).extend(unreached)
+        for depth, ring_hosts in rings.items():
+            radius = outer_radius * depth / max_depth
+            positions.update(_ring_positions(ring_hosts, center_x, center_y, radius))
     else:
         positions.update(_ring_positions(list(host_names), center_x, center_y, outer_radius))
 
@@ -576,8 +638,21 @@ def generate_location_map(zabbix, netbox, location, device_to_hostid: dict):
 
     topology_links = resolve_location_topology(netbox, device_to_hostid)
 
+    # Sizing needs the same hop-depth hub/rings build_location_map_content
+    # will compute for layout - done again there rather than threaded
+    # through as a parameter, since it's cheap, pure in-memory work (no
+    # API calls), not worth coupling the two functions' signatures over.
+    hub_name = find_hub_host([h['host'] for h in hosts])
+    hub_id = next((h['hostid'] for h in hosts if h['host'] == hub_name), None)
+    max_depth = 1
+    if hub_id:
+        others = [h['hostid'] for h in hosts if h['hostid'] != hub_id]
+        depths = _hop_depths(hub_id, others, topology_links)
+        if depths:
+            max_depth = max(depths.values())
+
     map_name = f"Location - {location.name}"
-    width, height = site_map_dimensions(len(hosts))
+    width, height = site_map_dimensions(len(hosts), max_depth)
     sysmapid = get_or_create_map(zabbix, map_name, width, height)
 
     selements, links = build_location_map_content(zabbix, hosts, topology_links, width, height)
