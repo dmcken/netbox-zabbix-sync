@@ -18,6 +18,7 @@ import pyzabbix
 
 # Local imports
 import exceptions
+import generate_backhaul_map
 import utils
 
 # Set template and device Netbox "custom field" names
@@ -39,6 +40,12 @@ EXTERNAL_LINKS_DASHBOARD_NAME = "External Links"
 EXTERNAL_LINKS_GRID_WIDTH = 72
 EXTERNAL_LINKS_WIDGET_WIDTH = 18
 EXTERNAL_LINKS_WIDGET_HEIGHT = 5
+
+# Per-location alert suppression: every host in a "Location - <code>"
+# group gets its own ICMP-unavailable trigger dependent on that
+# location's hub (see sync_location_dependencies()), so one link
+# outage doesn't fire one alert per downstream host.
+ICMP_TRIGGER_DESCRIPTION = "Unavailable by ICMP ping"
 
 # Set by main() from NETBOX_PREFER_IPV4 in .env. False (default) keeps
 # today's behavior unchanged - whatever Netbox itself considers
@@ -887,6 +894,134 @@ def sync_external_links_dashboard(nb, zabbix, provider_ignore_prefixes):
     )
 
 
+def _icmp_trigger(zabbix, hostid):
+    """Returns {'triggerid', 'dependencies'} for hostid's own
+    ICMP_TRIGGER_DESCRIPTION trigger, or None if it has none.
+    """
+    triggers = zabbix.trigger.get(
+        hostids=[hostid],
+        filter={'description': ICMP_TRIGGER_DESCRIPTION},
+        selectDependencies=['triggerid'],
+        output=['triggerid'],
+    )
+    return triggers[0] if triggers else None
+
+
+def _depend_on_hub(zabbix, host, hub_trigger):
+    """Makes host's own ICMP-unavailable trigger depend on hub_trigger,
+    if it has one and isn't already set up that way. Leaves any other
+    dependency already on the trigger untouched.
+    """
+    trigger = _icmp_trigger(zabbix, host['hostid'])
+    if trigger is None:
+        logger.debug(
+            f"Host {host['host']}: no '{ICMP_TRIGGER_DESCRIPTION}' "
+            "trigger, skipping dependency."
+        )
+        return
+
+    existing_ids = {dep['triggerid'] for dep in trigger['dependencies']}
+    if hub_trigger['triggerid'] in existing_ids:
+        logger.debug(f"Host {host['host']}: hub dependency in-sync.")
+        return
+
+    zabbix.trigger.update(
+        triggerid=trigger['triggerid'],
+        dependencies=[
+            {'triggerid': tid}
+            for tid in existing_ids | {hub_trigger['triggerid']}
+        ],
+    )
+    logger.warning(
+        f"Host {host['host']}: depends on hub trigger "
+        f"{hub_trigger['triggerid']} OUT of sync - added."
+    )
+
+
+def _ensure_site_down_trigger(zabbix, hub, location_code):
+    """Creates the hub's 'Site <location_code> is down' trigger if it
+    doesn't already exist, cloning the hub's own ICMP-unavailable
+    expression under a human-readable name. This is the one alert
+    meant to actually surface a location-wide outage, instead of every
+    downstream host's own (now-suppressed) ICMP trigger.
+    """
+    description = f"Site {location_code} is down"
+    existing = zabbix.trigger.get(
+        hostids=[hub['hostid']],
+        filter={'description': description},
+        output=['triggerid'],
+    )
+    if existing:
+        logger.debug(f"Location {location_code}: 'is down' trigger in-sync.")
+        return
+
+    zabbix.trigger.create(
+        description=description,
+        expression=f"last(/{hub['host']}/icmpping)=0",
+        priority='4',
+    )
+    logger.warning(f"Location {location_code}: created '{description}' trigger.")
+
+
+def sync_location_dependencies(zabbix):
+    """Suppresses per-host ICMP-unavailable alerts for every other host
+    in a location when that location's hub is itself down, and raises
+    a single clear 'Site <location> is down' alert on the hub instead.
+
+    For every 'Location - <code>' Zabbix host group (only considering
+    enabled hosts, so a decommissioned/offline device can never become
+    a permanent false hub that blocks every alert in its location):
+    - Finds the hub via generate_backhaul_map.find_hub_host() - the
+      same hub a location's auto-generated map already uses as its
+      center, so this stays consistent with that without duplicating
+      the logic. Locations with no IE/CE-named host are skipped, since
+      there's nothing to anchor a dependency on.
+    - Points every other host's own ICMP_TRIGGER_DESCRIPTION trigger
+      at the hub's, via a Zabbix trigger dependency.
+    - Ensures the hub's 'Site <location> is down' trigger exists.
+    """
+    location_groups = [
+        group for group in zabbix.hostgroup.get(output=['groupid', 'name'])
+        if group['name'].startswith('Location - ')
+    ]
+
+    for group in location_groups:
+        location_code = group['name'].removeprefix('Location - ')
+        hosts = zabbix.host.get(
+            groupids=[group['groupid']],
+            filter={'status': '0'},  # Enabled only - see docstring.
+            output=['hostid', 'host'],
+        )
+        if len(hosts) < 2:
+            continue  # Nothing to depend on anything else.
+
+        hub_name = generate_backhaul_map.find_hub_host(
+            [host['host'] for host in hosts]
+        )
+        if hub_name is None:
+            logger.debug(
+                f"Location {location_code}: no IE/CE hub host, "
+                "skipping dependency sync."
+            )
+            continue
+
+        hub = next(host for host in hosts if host['host'] == hub_name)
+        hub_trigger = _icmp_trigger(zabbix, hub['hostid'])
+        if hub_trigger is None:
+            logger.warning(
+                f"Location {location_code}: hub {hub_name} has no "
+                f"'{ICMP_TRIGGER_DESCRIPTION}' trigger, skipping."
+            )
+            continue
+
+        for host in hosts:
+            if host['hostid'] == hub['hostid']:
+                continue
+            _depend_on_hub(zabbix, host, hub_trigger)
+
+        _ensure_site_down_trigger(zabbix, hub, location_code)
+
+
 def main():
     """Run the sync process.
     """
@@ -1003,6 +1138,12 @@ def main():
         )
     except pyzabbix.ZabbixAPIException as exc:
         logger.error(f"Failed to sync External Links dashboard: {exc}")
+        logger.error(traceback.format_exc())
+
+    try:
+        sync_location_dependencies(zabbix)
+    except pyzabbix.ZabbixAPIException as exc:
+        logger.error(f"Failed to sync location alert dependencies: {exc}")
         logger.error(traceback.format_exc())
 
     logger.info("Done")
