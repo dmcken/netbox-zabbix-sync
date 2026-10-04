@@ -1,0 +1,47 @@
+name: Release
+
+# Tags and releases every push to main that bumps __version__, so
+# downstream consumers can pin to a vX.Y.Z ref instead of a floating
+# @main. Mirrors dmcken/ubnt_automata's release.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '__init__.py'
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Read version
+      id: version
+      run: |
+        VERSION=$(python3 -c "import re; print(re.search(r'__version__ = [\"\x27](.+)[\"\x27]', open('__init__.py').read()).group(1))")
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Check if tag already exists
+      id: check
+      run: |
+        if git rev-parse -q --verify "refs/tags/v${{ steps.version.outputs.version }}" >/dev/null; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Create tag and release
+      if: steps.check.outputs.exists == 'false'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        git tag "v${{ steps.version.outputs.version }}"
+        git push origin "v${{ steps.version.outputs.version }}"
+        gh release create "v${{ steps.version.outputs.version }}" \
+          --title "v${{ steps.version.outputs.version }}" \
+          --generate-notes
