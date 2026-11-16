@@ -1,5 +1,6 @@
 #!/usr/bin/python3
-"""Sync Netbox devices to Zabbix for monitoring.
+"""Sync Netbox devices (and VMs whose platform names a Zabbix
+template) to Zabbix for monitoring.
 
 
 
@@ -27,6 +28,10 @@ CF = {
     'HOSTID'   : "zabbix_hostid",
     'SNMP_VER' : "snmp_version",
 }
+
+# Netbox tag (slug) that keeps a device or VM out of Zabbix entirely -
+# e.g. a VM whose platform has a template but no agent installed yet.
+SKIP_TAG_SLUG = "zabbix-skip"
 
 # Netbox to Zabbix device state convertion
 zabbix_device_removal = ["Decommissioning", "Inventory"]
@@ -71,6 +76,13 @@ class NetworkDevice:
     # _clean_hostname) is replaced with '_' - customer/site names can
     # contain arbitrary punctuation (e.g. a '/' in a street address).
     _host_disallowed_chars = re.compile(r'[^A-Za-z0-9 ._-]')
+
+    # Netbox object type journal entries are attached to.
+    JOURNAL_OBJECT_TYPE = "dcim.device"
+
+    @property
+    def interface_class(self):
+        return ZabbixInterface
 
     def __init__(self, nb_device, zabbix, nb_journal_class, journal=None,
                  site_gps_map=None):
@@ -271,7 +283,7 @@ class NetworkDevice:
         """
         if not self.template_name:
             e = (
-                f"Device template '{self.nb.device_type.display}' "
+                f"{self._template_source()} "
                 "has no Zabbix template defined."
             )
             logger.error(e)
@@ -291,6 +303,10 @@ class NetworkDevice:
         )
         logger.warning(err_msg)
         raise exceptions.SyncInventoryError(err_msg)
+
+    def _template_source(self) -> str:
+        """Describes where the Zabbix template comes from, for messages."""
+        return f"Device template '{self.nb.device_type.display}'"
 
     def cleanup(self):
         """
@@ -322,7 +338,7 @@ class NetworkDevice:
         """Set appropriate interface details.
         """
         try:
-            interface = ZabbixInterface(self.nb, self.ip)
+            interface = self.interface_class(self.nb, self.ip)
             return [interface.interface]
         except exceptions.InterfaceConfigError as exc:
             exc = f"{self.name}: {exc}"
@@ -617,7 +633,7 @@ class NetworkDevice:
                 logger.warning(f"Value {severity} not valid for NB journal entries.")
                 return False
             journal = {
-                "assigned_object_type": "dcim.device",
+                "assigned_object_type": self.JOURNAL_OBJECT_TYPE,
                 "assigned_object_id":   self.id,
                 "kind":                 severity,
                 "comments":             message,
@@ -729,6 +745,173 @@ class ZabbixInterface:
         if self.device.device_type.custom_fields['snmp_version'] is not None:
             self.interface["details"]["version"] = self.device.device_type.\
                 custom_fields['snmp_version']
+
+
+class ZabbixAgentInterface(ZabbixInterface):
+    """Zabbix agent interface (passive checks on 10050) - the default for
+    virtual machines, which have no device type to carry SNMP settings.
+    A config context "zabbix" with interface_type/interface_port still
+    overrides it, as for devices."""
+
+    def set_snmp_default(self):
+        self.interface = self.skelet
+        self.interface["type"] = "1"
+        self.interface["port"] = "10050"
+
+
+class VirtualMachineHost(NetworkDevice):
+    """A Netbox virtual machine monitored through the Zabbix agent.
+
+    The Zabbix template comes from the VM's platform (the platform's
+    zabbix_template custom field, mapped once in main() because the VM
+    list only carries a brief nested platform). Only VMs whose platform
+    has a template are synced; see sync_virtual_machines().
+    """
+
+    JOURNAL_OBJECT_TYPE = "virtualization.virtualmachine"
+
+    def __init__(self, nb_vm, zabbix, nb_journal_class, journal=None,
+                 site_gps_map=None, platform_templates=None):
+        self.platform_templates = platform_templates or {}
+        super().__init__(nb_vm, zabbix, nb_journal_class, journal,
+                         site_gps_map=site_gps_map)
+
+    @property
+    def interface_class(self):
+        return ZabbixAgentInterface
+
+    def _set_basics(self):
+        # Agents listen on the LAN, so use the IPv4 primary when there is
+        # one - Netbox's primary_ip prefers IPv6 when both are set.
+        primary_ip = self.nb.primary_ip4 or self.nb.primary_ip
+        if not primary_ip:
+            e = f"VM {self.name}: no primary IP."
+            logger.warning(e)
+            raise exceptions.SyncInventoryError(e)
+        self.cidr = primary_ip.address
+        self.ip = self.cidr.split("/")[0]
+
+        platform_id = utils.rgetattr(self.nb, 'platform.id', None)
+        self.template_name = self.platform_templates.get(platform_id)
+
+        self.zabbix_id = self.nb.custom_fields.get(CF['HOSTID'])
+
+        site_id = utils.rgetattr(self.nb, 'site.id', None)
+        self.site_lat, self.site_lon = self.site_gps_map.get(site_id, (None, None))
+
+    def set_host_groups(self):
+        super().set_host_groups()
+        cluster = utils.rgetattr(self.nb, 'cluster.name', None)
+        if cluster:
+            self.hostgroups.append(f"Cluster - {cluster}")
+
+    def is_cluster(self):
+        # Virtual chassis clustering only applies to devices.
+        return False
+
+    def _template_source(self) -> str:
+        return f"Platform '{utils.rgetattr(self.nb, 'platform.name', None)}'"
+
+
+def _has_skip_tag(nb_object) -> bool:
+    return any(tag['slug'] == SKIP_TAG_SLUG for tag in nb_object.tags)
+
+
+def sync_host(device, arguments, zabbix_groups_map, zabbix_templates,
+              zabbix_proxies):
+    """Create, update, disable or clean up one Netbox host in Zabbix."""
+    # Checks if device is part of cluster.
+    # Requires the cluster argument.
+    if device.is_cluster() and arguments.cluster:
+        # Check if device is master or slave
+        if device.promote_master_device():
+            logger.info(f"Device {device.name} is part of cluster and primary.")
+        else:
+            # Device is secondary in cluster.
+            # Don't continue with this device.
+            logger.info(f"Device {device.name} is part of cluster "
+                        f"but not primary. Skipping this host...")
+            return
+
+    # Checks if device is in cleanup state
+    if device.status in zabbix_device_removal:
+        if device.zabbix_id:
+            # Delete device from Zabbix
+            # and remove hostID from Netbox.
+            device.cleanup()
+            logger.info(f"Cleaned up host {device.name}.")
+        else:
+            # Device has been added to Netbox
+            # but is not in Activate state
+            logger.info(
+                f"Skipping host {device.name} since its "
+                f"not in the active state."
+            )
+        return
+    elif device.status in zabbix_device_disable:
+        device.zabbix_state = 1
+
+    # Create any missing hostgroups, merging newly created
+    # ones into the shared map so later devices see them too.
+    new_groups = device.create_zabbix_hostgroups(zabbix_groups_map)
+    for new_group in new_groups:
+        zabbix_groups_map[new_group['name']] = new_group
+
+    if device.zabbix_id: # Update Zabbix
+        device.consistency_check(
+            zabbix_groups_map,
+            zabbix_templates,
+            zabbix_proxies,
+            arguments.proxy_power,
+        )
+    else: # Add to Zabbix
+        device.create_in_zabbix(
+            zabbix_groups_map,
+            zabbix_templates,
+            zabbix_proxies
+        )
+
+
+def sync_virtual_machines(netbox, zabbix, arguments, site_gps_map,
+                          zabbix_groups_map, zabbix_templates, zabbix_proxies):
+    """Sync Netbox VMs whose platform names a Zabbix template.
+
+    The platform's zabbix_template custom field is the opt-in: VMs on a
+    platform without one (or with no primary IP yet) are left alone, so
+    adding the field to a platform is what brings its VMs into Zabbix.
+    """
+    platform_templates = {
+        platform.id: platform.custom_fields.get(CF['TEMPLATE'])
+        for platform in netbox.dcim.platforms.all()
+        if platform.custom_fields.get(CF['TEMPLATE'])
+    }
+    if not platform_templates:
+        logger.debug("No platform has a Zabbix template; skipping VMs.")
+        return
+
+    for nb_vm in netbox.virtualization.virtual_machines.all():
+        try:
+            if utils.rgetattr(nb_vm, 'platform.id', None) not in platform_templates:
+                logger.debug(f"Skipping VM {nb_vm.name}: platform has no Zabbix template.")
+                continue
+            if _has_skip_tag(nb_vm):
+                logger.debug(f"Skipping VM {nb_vm.name}: tagged {SKIP_TAG_SLUG}.")
+                continue
+            if not (nb_vm.primary_ip4 or nb_vm.primary_ip):
+                logger.debug(f"Skipping VM {nb_vm.name}: no primary IP.")
+                continue
+            vm = VirtualMachineHost(
+                nb_vm,
+                zabbix,
+                netbox.extras.journal_entries,
+                arguments.journal,
+                site_gps_map=site_gps_map,
+                platform_templates=platform_templates,
+            )
+            sync_host(vm, arguments, zabbix_groups_map, zabbix_templates,
+                      zabbix_proxies)
+        except exceptions.SyncError as exc:
+            logger.error(f"Skipping VM {nb_vm.name}: {exc}")
 
 
 def _circuit_interface_devices(nb, circuit):
@@ -1067,7 +1250,10 @@ def main():
                 logger.debug(f"Skipping host: {nb_device.name}")
                 continue
 
-            # Lets start dealing with the device
+            if _has_skip_tag(nb_device):
+                logger.debug(f"Skipping host {nb_device.name}: tagged {SKIP_TAG_SLUG}.")
+                continue
+
             device = NetworkDevice(
                 nb_device,
                 zabbix,
@@ -1075,62 +1261,13 @@ def main():
                 arguments.journal,
                 site_gps_map=site_gps_map,
             )
-            # Checks if device is part of cluster.
-            # Requires the cluster argument.
-            if device.is_cluster() and arguments.cluster:
-                # Check if device is master or slave
-                if device.promote_master_device():
-                    err_msg = f"Device {device.name} is part of " +\
-                        "cluster and primary."
-                    logger.info(err_msg)
-                else:
-                    # Device is secondary in cluster.
-                    # Don't continue with this device.
-                    err_msg = f"Device {device.name} is part of cluster " \
-                              f"but not primary. Skipping this host..."
-                    logger.info(err_msg)
-                    continue
-
-            # Checks if device is in cleanup state
-            if device.status in zabbix_device_removal:
-                if device.zabbix_id :
-                    # Delete device from Zabbix
-                    # and remove hostID from Netbox.
-                    device.cleanup()
-                    logger.info(f"Cleaned up host {device.name}.")
-
-                else:
-                    # Device has been added to Netbox
-                    # but is not in Activate state
-                    logger.info(
-                        f"Skipping host {device.name} since its "
-                        f"not in the active state."
-                    )
-                continue
-            elif device.status in zabbix_device_disable:
-                device.zabbix_state = 1
-
-            # Create any missing hostgroups, merging newly created
-            # ones into the shared map so later devices see them too.
-            new_groups = device.create_zabbix_hostgroups(zabbix_groups_map)
-            for new_group in new_groups:
-                zabbix_groups_map[new_group['name']] = new_group
-
-            if device.zabbix_id: # Update Zabbix
-                device.consistency_check(
-                    zabbix_groups_map,
-                    zabbix_templates,
-                    zabbix_proxies,
-                    arguments.proxy_power,
-                )
-            else: # Add to Zabbix
-                device.create_in_zabbix(
-                    zabbix_groups_map,
-                    zabbix_templates,
-                    zabbix_proxies
-                )
+            sync_host(device, arguments, zabbix_groups_map, zabbix_templates,
+                      zabbix_proxies)
         except exceptions.SyncError as exc:
             logger.error(f"Skipping device {nb_device.name}: {exc}")
+
+    sync_virtual_machines(netbox, zabbix, arguments, site_gps_map,
+                          zabbix_groups_map, zabbix_templates, zabbix_proxies)
 
     try:
         sync_external_links_dashboard(

@@ -55,9 +55,32 @@ Groups are created and the hosts automatically populated based on the following 
 | Rack     | Rack - [Rack Name]         | |
 | Role     | Role - [Device Role]       | |
 | Tenant   | Tenant - [Tenant Name]     | |
+| Cluster  | Cluster - [Cluster Name]   | Virtual machines only |
 
 ### Custom groups:
 Now a custom tag of "ZabbixGroup#Hello" will proceed to create the group "Hello" if it doesn't exist and place the devices bearing that tag inside of that group.
+
+## Virtual machines
+
+Virtual machines are synced when their **platform** names a Zabbix template:
+set the `zabbix_template` custom field on the platform (e.g. Ubuntu ->
+"Linux by Zabbix agent"). Platforms without one are ignored, so adding the
+field to a platform is what brings its VMs into Zabbix.
+
+* The Zabbix host is monitored through the Zabbix agent (passive, port
+  10050) on the VM's primary IPv4 address (falling back to its primary IP).
+  A "zabbix" config context with `interface_type`/`interface_port`
+  overrides this, as for devices.
+* VMs without a primary IP are skipped quietly.
+* Statuses map to Zabbix exactly as for devices (see below), and the Zabbix
+  host ID is stored in the VM's `zabbix_hostid` custom field.
+
+## Skipping a host
+
+Tag a device or VM with **Zabbix - Skip** (slug `zabbix-skip`) to keep it
+out of Zabbix, e.g. a VM on a templated platform that has no agent yet.
+The tag only stops the sync touching the host; it does not delete an
+existing Zabbix host.
 
 
 
