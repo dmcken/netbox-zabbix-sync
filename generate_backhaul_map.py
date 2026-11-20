@@ -63,6 +63,7 @@ LOCATION_MAP_ROLE_SLUGS = {'router', 'switch', 'switch-poe', 'access-switch', 'b
 SITE_ICONID = "124"       # Router_(48).
 INTERNET_ICONID = "3"     # Cloud_(48) - kept distinct from regular sites.
 STALE_SECONDS = 15 * 60
+MAX_PLAUSIBLE_UTILIZATION_PCT = 150
 MARGIN = 100
 
 COLOR_NO_DATA = "999999"
@@ -382,65 +383,142 @@ def zabbix_host_name(device_name: str):
     return f"BH_{match.group(1)}_{match.group(2)}"
 
 
-def resolve_link_metrics(zabbix, host_name) -> dict:
-    """Fetches live capacity/utilization for one backhaul radio host.
+def resolve_backhaul_hostids(netbox) -> dict:
+    """Returns {Netbox device name: Zabbix hostid} for every backhaul
+    radio with a zabbix_hostid custom field set (written by the main
+    sync). Preferred over deriving the Zabbix host name from the device
+    name, which breaks for radios whose names carry a suffix such as
+    'BH_DAN>NUR 80GHz' (Zabbix host 'BH_DAN_NUR 80GHz', not
+    'BH_DAN_NUR')."""
+    hostids = {}
+    for device in netbox.dcim.devices.filter(role='backhaul'):
+        hostid = device.custom_fields.get('zabbix_hostid')
+        if hostid:
+            hostids[device.name] = str(hostid)
+    return hostids
+
+
+def resolve_link_metrics(zabbix, host_name, hostid=None) -> dict:
+    """Fetches live capacity/utilization for one backhaul radio host,
+    by Zabbix hostid when known, otherwise by derived host name.
 
     Returns {'utilization_pct': float|None, 'label': str}. A None
     percentage means "no live data available" - callers must never
     render that as 0%.
     """
-    if host_name is None:
-        return {'utilization_pct': None, 'label': "no data"}
-
-    hosts = zabbix.host.get(filter={'host': host_name}, output=['hostid'])
-    if not hosts:
-        logger.warning(f"No Zabbix host found for backhaul radio {host_name}.")
-        return {'utilization_pct': None, 'label': "no data"}
+    if hostid is None:
+        if host_name is None:
+            return {'utilization_pct': None, 'label': "no data"}
+        hosts = zabbix.host.get(filter={'host': host_name}, output=['hostid'])
+        if not hosts:
+            logger.warning(f"No Zabbix host found for backhaul radio {host_name}.")
+            return {'utilization_pct': None, 'label': "no data"}
+        hostid = hosts[0]['hostid']
+    host_name = host_name or f"hostid {hostid}"
 
     items = zabbix.item.get(
-        hostids=[hosts[0]['hostid']],
+        hostids=[hostid],
         output=['key_', 'name', 'lastvalue', 'lastclock'],
     )
 
-    def freshest(*prefixes):
-        matches = [i for i in items if any(i['key_'].startswith(p) for p in prefixes)]
-        matches = [i for i in matches if int(i['lastclock']) > 0]
-        if not matches:
-            return None
-        latest_clock = max(int(i['lastclock']) for i in matches)
-        matches = [i for i in matches if int(i['lastclock']) == latest_clock]
-        # A backhaul host's SNMP template often also exposes wired uplink
-        # interfaces (e.g. TenGigE/GigabitEthernet) polled in the same
-        # cycle as the radio itself - prefer the one actually named
-        # "radio" when there's a tie, rather than an arbitrary interface.
-        radio_matches = [i for i in matches if 'radio' in i.get('name', '').lower()]
-        return (radio_matches or matches)[0]
-
-    # Best-effort: a host can have several SNMP interfaces (radio + mgmt).
-    # Without a reliable way to identify "the backhaul interface" across
-    # vendors, use whichever matching item last reported live data.
-    throughput_item = freshest(
-        'net.if.in[', 'net.if.out[', 'throughput.downlink', 'throughput.uplink',
-    )
-    capacity_item = freshest('net.if.speed[', 'capacity.downlink', 'capacity.uplink')
-
-    if not throughput_item or not capacity_item:
+    pairs = _utilization_pairs(items)
+    if not pairs:
         logger.warning(f"No live utilization data for backhaul host {host_name}.")
         return {'utilization_pct': None, 'label': "no data"}
 
-    if time.time() - int(throughput_item['lastclock']) > STALE_SECONDS:
+    # Throughput items must be fresh; capacity/speed items are often
+    # polled far less often (ifHighSpeed hourly), so only the throughput
+    # side's age is checked.
+    if any(time.time() - int(thr['lastclock']) > STALE_SECONDS for thr, _cap in pairs):
         logger.warning(f"Stale utilization data for backhaul host {host_name}.")
         return {'utilization_pct': None, 'label': "no data"}
 
-    throughput_bps = float(throughput_item['lastvalue'])
-    capacity_bps = float(capacity_item['lastvalue'])
-    if capacity_bps <= 0:
-        logger.warning(f"Zero/invalid capacity for backhaul host {host_name}.")
-        return {'utilization_pct': None, 'label': "no data"}
-
-    pct = throughput_bps / capacity_bps * 100
+    throughput_bps = max(float(thr['lastvalue']) for thr, _cap in pairs)
+    pct = max(float(thr['lastvalue']) / float(cap['lastvalue']) * 100 for thr, cap in pairs)
+    if pct > MAX_PLAUSIBLE_UTILIZATION_PCT:
+        # Throughput well beyond the link's own reported capacity is a
+        # bad item (e.g. a raw counter stored without a per-second
+        # conversion), not real load - don't paint it as a red hot link.
+        logger.warning(
+            f"Implausible utilization {pct:.0f}% for backhaul host {host_name} "
+            f"({throughput_bps / 1e6:.0f} Mbps); check its Zabbix template items."
+        )
+        return {'utilization_pct': None, 'label': "invalid data"}
     label = f"{throughput_bps / 1e6:.0f} Mbps / {pct:.0f}%"
     return {'utilization_pct': pct, 'label': label}
+
+
+_IF_ITEM_RE = re.compile(r'^net\.if\.(in|out|speed)\[[^\]]*?\.(\d+)\]$')
+_RADIO_IF_HINTS = ('radio', 'air', 'wlan', 'ath', 'carrier')
+
+
+def _utilization_pairs(items: list) -> list:
+    """Picks [(throughput_item, capacity_item), ...] - one pair per
+    traffic direction - for a backhaul radio's utilization, always
+    taking a throughput and its capacity from the same interface/radio.
+
+    Tried in order, first match wins:
+      1. IF-MIB: the radio interface's (named Radio/air/wlan/ath/carrier)
+         in and out octets, each against that same ifIndex's speed.
+      2. RAy3: Ethernet data-port throughput in/out against the current
+         air net bitrate.
+      3. airFiber/LTU: downlink/uplink throughput against the matching
+         direction's capacity.
+      4. IF-MIB fallback: the busiest interface that has a non-zero speed.
+
+    Previously the freshest throughput item and the freshest speed item
+    were picked independently, which on multi-port radios (e.g. Aviat
+    WTM4800) could divide radio traffic by a 0 bps or 10G Ethernet port
+    speed - giving "no data" or utilizations like 900%.
+    """
+    live = {i['key_']: i for i in items if int(i['lastclock']) > 0}
+
+    def positive(item):
+        try:
+            return item is not None and float(item['lastvalue']) > 0
+        except (TypeError, ValueError):
+            return False
+
+    per_if = {}
+    for key, item in live.items():
+        match = _IF_ITEM_RE.match(key)
+        if match:
+            per_if.setdefault(match.group(2), {})[match.group(1)] = item
+    usable_ifs = {
+        idx: d for idx, d in per_if.items()
+        if {'in', 'out', 'speed'} <= d.keys() and positive(d['speed'])
+    }
+
+    def if_pairs(d):
+        return [(d['in'], d['speed']), (d['out'], d['speed'])]
+
+    radio_ifs = [
+        d for d in usable_ifs.values()
+        if any(hint in d['in'].get('name', '').lower() for hint in _RADIO_IF_HINTS)
+    ]
+    if radio_ifs:
+        busiest = max(radio_ifs, key=lambda d: float(d['in']['lastvalue']) + float(d['out']['lastvalue']))
+        return if_pairs(busiest)
+
+    if positive(live.get('netBitrate')) and 'ethInThroughput' in live and 'ethOutThroughput' in live:
+        return [(live['ethInThroughput'], live['netBitrate']),
+                (live['ethOutThroughput'], live['netBitrate'])]
+
+    def by_prefix(prefix):
+        return next((i for k, i in sorted(live.items()) if k.startswith(prefix)), None)
+
+    af_pairs = [
+        (by_prefix(f'throughput.{direction}'), by_prefix(f'capacity.{direction}'))
+        for direction in ('downlink', 'uplink')
+    ]
+    af_pairs = [(thr, cap) for thr, cap in af_pairs if thr is not None and positive(cap)]
+    if af_pairs:
+        return af_pairs
+
+    if usable_ifs:
+        busiest = max(usable_ifs.values(), key=lambda d: float(d['in']['lastvalue']) + float(d['out']['lastvalue']))
+        return if_pairs(busiest)
+    return []
 
 
 def color_for_utilization(pct) -> str:
@@ -975,8 +1053,10 @@ def build_selements(positions: dict, graph: nx.Graph, site_map_ids: dict):
     return selements, slug_to_id
 
 
-def build_links(graph: nx.Graph, slug_to_id: dict, zabbix) -> list:
-    """Builds the links list with live capacity/utilization labels."""
+def build_links(graph: nx.Graph, slug_to_id: dict, zabbix, hostids: dict) -> list:
+    """Builds the links list with live capacity/utilization labels.
+    hostids is {Netbox device name: Zabbix hostid} from
+    resolve_backhaul_hostids."""
     links = []
     for site_a, site_b, data in graph.edges(data=True):
         if data.get('is_internet_link') or data.get('is_circuit_link'):
@@ -996,11 +1076,16 @@ def build_links(graph: nx.Graph, slug_to_id: dict, zabbix) -> list:
             })
             continue
 
-        metrics = resolve_link_metrics(zabbix, zabbix_host_name(data['device_a']))
+        def metrics_for(device_name):
+            hostid = hostids.get(device_name)
+            name = device_name if hostid else zabbix_host_name(device_name)
+            return resolve_link_metrics(zabbix, name, hostid)
+
+        metrics = metrics_for(data['device_a'])
         if metrics['utilization_pct'] is None:
             # Radios at each end are separate Zabbix hosts; fall back to
             # the far end before giving up on this link entirely.
-            metrics = resolve_link_metrics(zabbix, zabbix_host_name(data['device_b']))
+            metrics = metrics_for(data['device_b'])
 
         links.append({
             'selementid1': slug_to_id[site_a],
@@ -1037,7 +1122,7 @@ def main():
     target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, map_width, map_height)
 
     selements, slug_to_id = build_selements(positions, graph, site_map_ids)
-    links = build_links(graph, slug_to_id, zabbix)
+    links = build_links(graph, slug_to_id, zabbix, resolve_backhaul_hostids(netbox))
 
     try:
         zabbix.map.update(sysmapid=target_sysmapid, selements=selements, links=links)
