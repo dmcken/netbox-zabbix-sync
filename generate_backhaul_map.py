@@ -170,8 +170,22 @@ def resolve_internet_circuits(netbox) -> dict:
             'name': site.name,
             'provider': site_term.circuit.provider.name,
             'speed_kbps': speed_kbps,
+            'site_interfaces': _circuit_site_interfaces([site_term]),
         }
     return sites
+
+
+def _circuit_site_interfaces(terms) -> dict:
+    """{site_slug: interface record} for each site termination cabled to
+    a device interface - the router/switch port the circuit is handed off
+    on, whose traffic counters are the circuit's own traffic."""
+    found = {}
+    for term in terms:
+        for peer in (term.link_peers or []):
+            if getattr(peer, 'device', None) is not None and term.termination_type == 'dcim.site':
+                found[term.termination.slug] = peer
+                break
+    return found
 
 
 def add_internet_node(graph: nx.Graph, netbox, core_slugs: set) -> None:
@@ -204,6 +218,7 @@ def add_internet_node(graph: nx.Graph, netbox, core_slugs: set) -> None:
             is_internet_link=True,
             provider=info['provider'],
             speed_kbps=info['speed_kbps'],
+            site_interfaces=info['site_interfaces'],
         )
 
 
@@ -259,7 +274,8 @@ def add_site_circuits(graph: nx.Graph, netbox, core_slugs: set) -> None:
             terms[0].termination.slug, terms[1].termination.slug,
             is_circuit_link=True,
             provider=circuits[circuit_id].provider.name,
-            speed_kbps=speed_kbps,
+            speed_kbps=speed_kbps or circuits[circuit_id].commit_rate,
+            site_interfaces=_circuit_site_interfaces(terms),
         )
 
 
@@ -471,6 +487,57 @@ def resolve_link_metrics(zabbix, host_name, hostid=None) -> dict:
         'label': None,
         'tx': directions.get('tx'),
         'rx': directions.get('rx'),
+    }
+
+
+def resolve_circuit_metrics(zabbix, netbox, interface, speed_kbps) -> dict:
+    """Live per-direction traffic for a circuit, read from the Zabbix
+    IF-MIB items of the device port it's handed off on (interface, a
+    Netbox interface record). tx = out of that port (from its site
+    toward the circuit's far end), rx = in. Capacity is the circuit's
+    provisioned speed when Netbox has one, else the port's own speed.
+
+    Same return shape as resolve_link_metrics; {'utilization_pct': None}
+    when the port's device isn't in Zabbix or has no fresh counters.
+    """
+    none = {'utilization_pct': None, 'label': None}
+    device = netbox.dcim.devices.get(interface.device.id)
+    hostid = device.custom_fields.get('zabbix_hostid') if device else None
+    if not hostid:
+        return none
+
+    items = zabbix.item.get(
+        hostids=[str(hostid)],
+        search={'name': f"Interface {interface.name}("},
+        startSearch=True,
+        output=['key_', 'name', 'lastvalue', 'lastclock'],
+    )
+    by_kind = {}
+    for item in items:
+        match = _IF_ITEM_RE.match(item['key_'])
+        if match and int(item['lastclock']) > 0:
+            by_kind[match.group(1)] = item
+    if 'in' not in by_kind or 'out' not in by_kind:
+        logger.warning(f"No traffic items for circuit port {device.name} {interface.name}.")
+        return none
+    if any(time.time() - int(by_kind[k]['lastclock']) > STALE_SECONDS for k in ('in', 'out')):
+        logger.warning(f"Stale traffic data for circuit port {device.name} {interface.name}.")
+        return none
+
+    if speed_kbps:
+        capacity = float(speed_kbps) * 1000
+    elif 'speed' in by_kind and float(by_kind['speed']['lastvalue']) > 0:
+        capacity = float(by_kind['speed']['lastvalue'])
+    else:
+        return none
+
+    tx = float(by_kind['out']['lastvalue'])
+    rx = float(by_kind['in']['lastvalue'])
+    return {
+        'utilization_pct': max(tx, rx) / capacity * 100,
+        'label': None,
+        'tx': (tx, capacity),
+        'rx': (rx, capacity),
     }
 
 
@@ -1115,19 +1182,27 @@ def build_selements(positions: dict, graph: nx.Graph, site_map_ids: dict):
     return selements, slug_to_id
 
 
-def build_links(graph: nx.Graph, slug_to_id: dict, zabbix, hostids: dict) -> list:
+def build_links(graph: nx.Graph, slug_to_id: dict, zabbix, netbox, hostids: dict) -> list:
     """Builds the links list with live capacity/utilization labels.
     hostids is {Netbox device name: Zabbix hostid} from
     resolve_backhaul_hostids."""
     links = []
     for site_a, site_b, data in graph.edges(data=True):
         if data.get('is_internet_link') or data.get('is_circuit_link'):
-            # A Netbox circuit, not a Zabbix-monitored radio - there's no
-            # live utilization to poll, but the termination's provisioned
-            # speed is real data worth labelling with.
-            if data['speed_kbps']:
-                label = f"{data['provider']}: {data['speed_kbps'] / 1000:.0f} Mbps"
-            else:
+            # A Netbox circuit: live traffic comes from the device port
+            # it's handed off on (either end will do), labelled per
+            # direction like a radio link, under the provider's name.
+            # Without a monitored port, fall back to the provisioned speed.
+            label = None
+            for from_slug, iface in data.get('site_interfaces', {}).items():
+                to_slug = site_b if from_slug == site_a else site_a
+                metrics = resolve_circuit_metrics(zabbix, netbox, iface, data['speed_kbps'])
+                if metrics['utilization_pct'] is not None:
+                    label = data['provider'] + "\n" + directional_label(graph, from_slug, to_slug, metrics)
+                    break
+            if label is None and data['speed_kbps']:
+                label = f"{data['provider']}: {_format_bps(data['speed_kbps'] * 1000)}"
+            elif label is None:
                 label = data['provider']
             links.append({
                 'selementid1': slug_to_id[site_a],
@@ -1188,7 +1263,7 @@ def main():
     target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, map_width, map_height)
 
     selements, slug_to_id = build_selements(positions, graph, site_map_ids)
-    links = build_links(graph, slug_to_id, zabbix, resolve_backhaul_hostids(netbox))
+    links = build_links(graph, slug_to_id, zabbix, netbox, resolve_backhaul_hostids(netbox))
 
     try:
         # label_type_map=0: a drill-down site element shows its own label
