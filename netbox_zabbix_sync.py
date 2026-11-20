@@ -1058,17 +1058,22 @@ def sync_external_links_dashboard(nb, zabbix, provider_ignore_prefixes):
     existing = zabbix.dashboard.get(
         filter={'name': EXTERNAL_LINKS_DASHBOARD_NAME}, output=['dashboardid'],
     )
+    admin_sharing = [{'usrgrpid': '7', 'permission': '2'}]  # Zabbix administrators, read-only
+
     if existing:
         zabbix.dashboard.update(
             dashboardid=existing[0]['dashboardid'],
             pages=pages,
+            private=1,
+            userGroups=admin_sharing,
         )
         action = "Updated"
     else:
         zabbix.dashboard.create(
             name=EXTERNAL_LINKS_DASHBOARD_NAME,
             pages=pages,
-            private=0,
+            private=1,
+            userGroups=admin_sharing,
         )
         action = "Created"
     logger.info(
