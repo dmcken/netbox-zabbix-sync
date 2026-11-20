@@ -501,16 +501,22 @@ def resolve_interface_metrics(zabbix, hostid: str, interface_name: str) -> dict:
     return {'utilization_pct': pct, 'label': label}
 
 
-def _hop_depths(hub_id, others: list, topology_links: list) -> dict:
-    """BFS hop-distance from hub_id to every reachable host, over the
-    real cable topology (topology_links) treated as an undirected
-    graph.
+def _bfs_tree(hub_id, others: list, topology_links: list) -> tuple:
+    """BFS from hub_id over the real cable topology (topology_links,
+    treated as an undirected graph), returning (depths, parent):
+    each reachable host's hop-distance from the hub, and its immediate
+    parent in the BFS tree (the hub itself for a direct hub-fed host).
 
     A host with no path back to the hub at all (an island - no cable
     chain connects it, directly or indirectly) is simply absent from
-    the returned dict, rather than assigned a guessed-at depth - same
-    "don't guess" spirit as resolve_location_topology only ever
-    drawing real cable links. The caller decides how to place those.
+    both, rather than assigned a guessed-at depth/parent - same "don't
+    guess" spirit as resolve_location_topology only ever drawing real
+    cable links. The caller decides how to place those.
+
+    Neighbours are visited in sorted order so the resulting tree (and
+    anything laid out from it, e.g. _assign_angles) is deterministic
+    across runs - a dict of sets would otherwise iterate in whatever
+    order the sets happen to hash into.
     """
     adjacency = {hostid: set() for hostid in [hub_id, *others]}
     for hostid_a, hostid_b, _iface_a, _iface_b in topology_links:
@@ -519,17 +525,95 @@ def _hop_depths(hub_id, others: list, topology_links: list) -> dict:
             adjacency[hostid_b].add(hostid_a)
 
     depths = {hub_id: 0}
+    parent = {}
     frontier = [hub_id]
     while frontier:
         next_frontier = []
         for hostid in frontier:
-            for neighbour in adjacency[hostid]:
+            for neighbour in sorted(adjacency[hostid]):
                 if neighbour not in depths:
                     depths[neighbour] = depths[hostid] + 1
+                    parent[neighbour] = hostid
                     next_frontier.append(neighbour)
         frontier = next_frontier
 
-    return {hostid: depths[hostid] for hostid in others if hostid in depths}
+    return (
+        {hostid: depths[hostid] for hostid in others if hostid in depths},
+        parent,
+    )
+
+
+def _hop_depths(hub_id, others: list, topology_links: list) -> dict:
+    """BFS hop-distance from hub_id to every reachable host - see
+    _bfs_tree, which this just discards the parent half of."""
+    depths, _parent = _bfs_tree(hub_id, others, topology_links)
+    return depths
+
+
+def _subtree_sizes(children: dict) -> dict:
+    """Total descendant count for every host that has any children -
+    used to order siblings by how much room their own subtree needs
+    (see _assign_angles)."""
+    sizes = {}
+
+    def count(hostid):
+        if hostid not in sizes:
+            sizes[hostid] = sum(1 + count(child) for child in children.get(hostid, []))
+        return sizes[hostid]
+
+    for hostid in children:
+        count(hostid)
+    return sizes
+
+
+def _assign_angles(hub_id, children: dict, unreached: list) -> dict:
+    """Assigns every non-hub host an angle (radians), by recursively
+    subdividing the hub's full circle down the BFS tree: a host's
+    angular wedge is a slice of its own parent's wedge, shared evenly
+    among siblings, so a whole subtree clusters on one side of the map
+    instead of each ring being spaced independently of the last.
+
+    That independence was the actual bug behind crossing lines on
+    Location - AUS: AUS-TS02's downstream AUS-TAP-E/-N were spaced
+    among the *entire* outer ring regardless of where AUS-TS02 itself
+    sat on the ring inside it, so their own cable lines had to cross
+    back across AUS-CE1's other spokes to reach them.
+
+    Siblings are ordered largest-subtree-first (see _subtree_sizes),
+    and the hub's own sweep is rotated so its single largest subtree -
+    the one most likely to need room - centers in the upper-left
+    (confirmed live: AUS-TS02's 4-AP subtree is exactly this case)
+    rather than landing wherever an arbitrary traversal order happens
+    to put it.
+
+    `unreached` hosts (no path back to the hub at all) get their own
+    wedges alongside the hub's direct children - same "place them
+    somewhere sane, don't invent a connection" spirit as the existing
+    outermost-ring fallback for them.
+    """
+    angles = {}
+    sizes = _subtree_sizes(children)
+
+    def ordered(kids):
+        return sorted(kids, key=lambda k: -sizes.get(k, 0))
+
+    def layout(hostid, kids, start_angle, end_angle):
+        if not kids:
+            return
+        span = (end_angle - start_angle) / len(kids)
+        for i, child in enumerate(kids):
+            child_start = start_angle + i * span
+            child_end = child_start + span
+            angles[child] = (child_start + child_end) / 2
+            layout(child, ordered(children.get(child, [])), child_start, child_end)
+
+    hub_kids = ordered(list(children.get(hub_id, [])) + list(unreached))
+    if hub_kids:
+        span = 2 * math.pi / len(hub_kids)
+        start_angle = math.radians(225) - span / 2
+        layout(hub_id, hub_kids, start_angle, start_angle + 2 * math.pi)
+
+    return angles
 
 
 def build_location_map_content(
@@ -563,7 +647,7 @@ def build_location_map_content(
     positions = {}
     if hub_id:
         positions[hub_id] = (center_x, center_y)
-        depths = _hop_depths(hub_id, others, topology_links)
+        depths, parent = _bfs_tree(hub_id, others, topology_links)
         max_depth = max(depths.values(), default=1) if depths else 1
         rings = {}
         for hostid, depth in depths.items():
@@ -575,9 +659,20 @@ def build_location_map_content(
         unreached = [hostid for hostid in others if hostid not in depths]
         if unreached:
             rings.setdefault(max_depth, []).extend(unreached)
+
+        children: dict = {}
+        for child, par in parent.items():
+            children.setdefault(par, []).append(child)
+        angles = _assign_angles(hub_id, children, unreached)
+
         for depth, ring_hosts in rings.items():
             radius = outer_radius * depth / max_depth
-            positions.update(_ring_positions(ring_hosts, center_x, center_y, radius))
+            for hostid in ring_hosts:
+                angle = angles[hostid]
+                positions[hostid] = (
+                    center_x + radius * math.cos(angle),
+                    center_y + radius * math.sin(angle),
+                )
     else:
         positions.update(_ring_positions(list(host_names), center_x, center_y, outer_radius))
 
