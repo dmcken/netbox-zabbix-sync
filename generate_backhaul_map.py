@@ -199,7 +199,8 @@ def add_internet_node(graph: nx.Graph, netbox, core_slugs: set) -> None:
 
 
 def _ring_positions(nodes, center_x, center_y, radius) -> dict:
-    """Places nodes evenly spaced around a circle of the given radius."""
+    """Places nodes evenly spaced around a circle of the given radius
+    (used by the per-location maps' fallback layout)."""
     count = len(nodes)
     if count == 0:
         return {}
@@ -214,37 +215,153 @@ def _ring_positions(nodes, center_x, center_y, radius) -> dict:
     }
 
 
-def compute_layout(graph, width, height, margin=MARGIN) -> dict:
-    """Computes node positions, pulling core-tagged sites toward the center.
+def add_site_circuits(graph: nx.Graph, netbox, core_slugs: set) -> None:
+    """Adds an edge, in place, for every non-Internet circuit (e.g. a
+    'wan' type inter-site fiber/leased line) whose A and Z ends both
+    terminate on a Netbox site - e.g. Swoop's SHP <-> SY5 link.
 
-    Uses a simple two-ring layout (core sites on a small inner ring, edge
-    sites on the outer ring) rather than networkx's shell_layout, since
-    that pulls in numpy - which fails to import on this host's CPU (no
-    AVX2/SSE4.2 support, a plain KVM guest). This graph is small (a
-    couple dozen sites at most), so a hand-rolled layout is plenty. The
-    Internet node, if present, is pinned to the exact center instead of
-    being placed on either ring.
+    Like add_internet_node, a circuit end at a site not already in the
+    graph adds that site. A circuit with fewer than two site terminations
+    (one end at a provider network, or not provisioned yet) isn't an
+    inter-site link and is skipped, not guessed at.
     """
-    site_nodes = [n for n in graph.nodes() if n != INTERNET_NODE]
-    core = [n for n in site_nodes if graph.nodes[n]['is_core']]
-    edge = [n for n in site_nodes if not graph.nodes[n]['is_core']]
-    if not core:
-        logger.warning(
-            "No sites tagged 'core-site' - treating all sites as one ring."
-        )
-        edge = site_nodes
+    circuits = {c.id: c for c in netbox.circuits.circuits.all()}
 
-    center_x, center_y = width / 2, height / 2
-    outer_radius = min(width, height) / 2 - margin
-    inner_radius = outer_radius * 0.35 if edge else 0
+    site_terms = {}
+    for term in netbox.circuits.circuit_terminations.all():
+        circuit = circuits.get(term.circuit.id)
+        if circuit is None or circuit.type.slug in INTERNET_CIRCUIT_TYPES:
+            continue
+        if term.termination_type == 'dcim.site':
+            site_terms.setdefault(term.circuit.id, []).append(term)
+
+    for circuit_id, terms in site_terms.items():
+        if len(terms) != 2 or terms[0].termination.slug == terms[1].termination.slug:
+            continue
+        speed_kbps = next(
+            (t.port_speed or t.upstream_speed for t in terms if t.port_speed or t.upstream_speed),
+            None,
+        )
+        for term in terms:
+            site = term.termination
+            if site.slug not in graph:
+                graph.add_node(site.slug, name=site.name, is_core=site.slug in core_slugs)
+        graph.add_edge(
+            terms[0].termination.slug, terms[1].termination.slug,
+            is_circuit_link=True,
+            provider=circuits[circuit_id].provider.name,
+            speed_kbps=speed_kbps,
+        )
+
+
+# Layered overview layout spacing. Each row is one hop further from the
+# Internet; these are minimums - the canvas grows past TARGET_WIDTH/
+# TARGET_HEIGHT when a row or the row count needs more room, so labels
+# never overlap on a busier network.
+LAYER_MIN_COL_SPACING = 190
+LAYER_MIN_ROW_SPACING = 150
+LAYER_ORDERING_PASSES = 8
+
+
+def _layer_rows(graph) -> list:
+    """Groups nodes into rows by BFS hop distance from the Internet node
+    (or, failing that, from the core-tagged sites, or the best-connected
+    site), so the map reads top-down from the uplinks outward the way the
+    hand-built 'WISP - Backhaul Map' does.
+
+    Sites with no path to the roots at all (an island in Netbox's link
+    data) go on one extra row at the bottom rather than being given a
+    guessed-at depth, so the gap stays visible.
+    """
+    if INTERNET_NODE in graph:
+        roots = [INTERNET_NODE]
+    else:
+        roots = sorted(n for n in graph.nodes() if graph.nodes[n]['is_core'])
+        if not roots and graph.number_of_nodes():
+            roots = [max(sorted(graph.nodes()), key=graph.degree)]
+
+    depth = {root: 0 for root in roots}
+    frontier = list(roots)
+    while frontier:
+        next_frontier = []
+        for node in frontier:
+            for neighbour in sorted(graph.neighbors(node)):
+                if neighbour not in depth:
+                    depth[neighbour] = depth[node] + 1
+                    next_frontier.append(neighbour)
+        frontier = next_frontier
+
+    row_count = max(depth.values(), default=-1) + 1
+    rows = [[] for _ in range(row_count)]
+    for node in sorted(depth):
+        rows[depth[node]].append(node)
+
+    islands = sorted(n for n in graph.nodes() if n not in depth)
+    if islands:
+        logger.warning(
+            "Sites with no backhaul/circuit path to the Internet in Netbox "
+            f"(drawn on the bottom row): {', '.join(islands)}"
+        )
+        rows.append(islands)
+    return rows
+
+
+def _order_rows(graph, rows: list) -> list:
+    """Reorders each row to reduce crossing links (barycenter heuristic,
+    alternating downward and upward sweeps): every node moves toward the
+    average position of its neighbours in the adjacent row, so connected
+    sites end up roughly stacked above one another instead of their
+    links criss-crossing the map. Ties fall back to name order so the
+    layout is stable across runs."""
+    rows = [list(row) for row in rows]
+
+    def sweep(row_indexes, ref_offset):
+        for i in row_indexes:
+            ref = rows[i + ref_offset]
+            ref_pos = {node: idx / max(len(ref) - 1, 1) for idx, node in enumerate(ref)}
+            current = {node: idx / max(len(rows[i]) - 1, 1) for idx, node in enumerate(rows[i])}
+
+            def barycenter(node):
+                linked = [ref_pos[n] for n in graph.neighbors(node) if n in ref_pos]
+                return sum(linked) / len(linked) if linked else current[node]
+
+            rows[i].sort(key=lambda node: (barycenter(node), graph.nodes[node]['name']))
+
+    for _ in range(LAYER_ORDERING_PASSES):
+        sweep(range(1, len(rows)), -1)
+        sweep(range(len(rows) - 2, -1, -1), 1)
+    return rows
+
+
+def compute_layout(graph, width, height, margin=MARGIN) -> tuple:
+    """Computes a top-down layered layout: the Internet cloud centred on
+    the top row, then one row per hop outward, each row spread evenly
+    across the full canvas width and ordered to minimise crossing links.
+
+    Returns (positions, width, height) - the canvas is grown past the
+    given width/height when the widest row or the number of rows needs
+    more room. Hand-rolled rather than networkx's layouts, since those
+    pull in numpy, which fails to import on this host's CPU (no
+    AVX2/SSE4.2 support, a plain KVM guest).
+    """
+    rows = _order_rows(graph, _layer_rows(graph))
+    widest = max((len(row) for row in rows), default=1)
+    width = max(width, 2 * margin + (widest - 1) * LAYER_MIN_COL_SPACING)
+    height = max(height, 2 * margin + (len(rows) - 1) * LAYER_MIN_ROW_SPACING)
+
+    usable_w = width - 2 * margin
+    row_gap = (height - 2 * margin) / max(len(rows) - 1, 1)
 
     positions = {}
-    if INTERNET_NODE in graph:
-        positions[INTERNET_NODE] = (center_x, center_y)
-    positions.update(_ring_positions(core, center_x, center_y, inner_radius))
-    positions.update(_ring_positions(edge, center_x, center_y, outer_radius))
+    for row_idx, row in enumerate(rows):
+        y = margin + row_idx * row_gap
+        # Centre each row in its own slice of the width, so a short row
+        # sits under the middle of the map rather than hugging the left.
+        slot = usable_w / len(row)
+        for col_idx, node in enumerate(row):
+            positions[node] = (margin + slot * (col_idx + 0.5), y)
 
-    return {node: (int(x), int(y)) for node, (x, y) in positions.items()}
+    return {node: (int(x), int(y)) for node, (x, y) in positions.items()}, int(width), int(height)
 
 
 def zabbix_host_name(device_name: str):
@@ -814,7 +931,7 @@ def resolve_site_drilldown_maps(netbox, graph: nx.Graph, location_map_ids: dict)
     """
     site_map_ids = {}
     for site_a, site_b, data in graph.edges(data=True):
-        if data.get('is_internet_link'):
+        if data.get('is_internet_link') or data.get('is_circuit_link'):
             continue
         for slug, device_name in ((site_a, data['device_a']), (site_b, data['device_b'])):
             if slug in site_map_ids:
@@ -862,7 +979,7 @@ def build_links(graph: nx.Graph, slug_to_id: dict, zabbix) -> list:
     """Builds the links list with live capacity/utilization labels."""
     links = []
     for site_a, site_b, data in graph.edges(data=True):
-        if data.get('is_internet_link'):
+        if data.get('is_internet_link') or data.get('is_circuit_link'):
             # A Netbox circuit, not a Zabbix-monitored radio - there's no
             # live utilization to poll, but the termination's provisioned
             # speed is real data worth labelling with.
@@ -907,6 +1024,7 @@ def main():
     core_slugs = resolve_core_site_slugs(netbox)
     graph = build_graph(netbox, core_slugs)
     add_internet_node(graph, netbox, core_slugs)
+    add_site_circuits(graph, netbox, core_slugs)
     logger.info(
         f"Backhaul graph: {graph.number_of_nodes()} sites, "
         f"{graph.number_of_edges()} links."
@@ -915,8 +1033,8 @@ def main():
     location_map_ids = build_location_maps(zabbix, netbox)
     site_map_ids = resolve_site_drilldown_maps(netbox, graph, location_map_ids)
 
-    target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, TARGET_WIDTH, TARGET_HEIGHT)
-    positions = compute_layout(graph, TARGET_WIDTH, TARGET_HEIGHT)
+    positions, map_width, map_height = compute_layout(graph, TARGET_WIDTH, TARGET_HEIGHT)
+    target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, map_width, map_height)
 
     selements, slug_to_id = build_selements(positions, graph, site_map_ids)
     links = build_links(graph, slug_to_id, zabbix)
