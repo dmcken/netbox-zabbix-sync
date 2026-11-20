@@ -33,7 +33,7 @@ import utils
 logger = logging.getLogger(__name__)
 
 TARGET_MAP_NAME = "WISP - Auto Backhaul"
-TARGET_WIDTH = 1200
+TARGET_WIDTH = 1700
 TARGET_HEIGHT = 900
 
 SITE_MAP_MIN_SIZE = 700         # Canvas floor for a small site.
@@ -124,7 +124,15 @@ def build_graph(netbox, core_slugs: set) -> nx.Graph:
             if site.slug not in graph:
                 graph.add_node(site.slug, name=site.name, is_core=site.slug in core_slugs)
 
-        graph.add_edge(site_a.slug, site_b.slug, device_a=device_a.name, device_b=device_b.name)
+        # site_devices pins each radio to its own site: networkx yields an
+        # undirected edge's endpoints in whatever order it stores them,
+        # not necessarily (site_a, site_b), so device_a/device_b alone
+        # can't be matched back to an endpoint by position.
+        graph.add_edge(
+            site_a.slug, site_b.slug,
+            device_a=device_a.name, device_b=device_b.name,
+            site_devices={site_a.slug: device_a.name, site_b.slug: device_b.name},
+        )
 
     return graph
 
@@ -260,7 +268,11 @@ def add_site_circuits(graph: nx.Graph, netbox, core_slugs: set) -> None:
 # TARGET_HEIGHT when a row or the row count needs more room, so labels
 # never overlap on a busier network.
 LAYER_MIN_COL_SPACING = 190
-LAYER_MIN_ROW_SPACING = 150
+LAYER_MIN_ROW_SPACING = 190
+# Alternate sites in a row are nudged up/down by this much, so a link
+# between two sites on the same row (or one crossing the row) doesn't run
+# straight through the sites in between and hide its label behind them.
+LAYER_STAGGER = 45
 LAYER_ORDERING_PASSES = 8
 
 
@@ -348,10 +360,10 @@ def compute_layout(graph, width, height, margin=MARGIN) -> tuple:
     rows = _order_rows(graph, _layer_rows(graph))
     widest = max((len(row) for row in rows), default=1)
     width = max(width, 2 * margin + (widest - 1) * LAYER_MIN_COL_SPACING)
-    height = max(height, 2 * margin + (len(rows) - 1) * LAYER_MIN_ROW_SPACING)
+    height = max(height, 2 * margin + LAYER_STAGGER + (len(rows) - 1) * LAYER_MIN_ROW_SPACING)
 
     usable_w = width - 2 * margin
-    row_gap = (height - 2 * margin) / max(len(rows) - 1, 1)
+    row_gap = (height - 2 * margin - LAYER_STAGGER) / max(len(rows) - 1, 1)
 
     positions = {}
     for row_idx, row in enumerate(rows):
@@ -360,7 +372,10 @@ def compute_layout(graph, width, height, margin=MARGIN) -> tuple:
         # sits under the middle of the map rather than hugging the left.
         slot = usable_w / len(row)
         for col_idx, node in enumerate(row):
-            positions[node] = (margin + slot * (col_idx + 0.5), y)
+            # Zig-zag multi-site rows (alternate sites dropped by
+            # LAYER_STAGGER); a single-site row stays on its own line.
+            stagger = LAYER_STAGGER if len(row) > 1 and col_idx % 2 else 0
+            positions[node] = (margin + slot * (col_idx + 0.5), y + stagger)
 
     return {node: (int(x), int(y)) for node, (x, y) in positions.items()}, int(width), int(height)
 
@@ -1011,7 +1026,8 @@ def resolve_site_drilldown_maps(netbox, graph: nx.Graph, location_map_ids: dict)
     for site_a, site_b, data in graph.edges(data=True):
         if data.get('is_internet_link') or data.get('is_circuit_link'):
             continue
-        for slug, device_name in ((site_a, data['device_a']), (site_b, data['device_b'])):
+        for slug in (site_a, site_b):
+            device_name = data['site_devices'][slug]
             if slug in site_map_ids:
                 continue
             devices = list(netbox.dcim.devices.filter(name=device_name))
@@ -1125,7 +1141,12 @@ def main():
     links = build_links(graph, slug_to_id, zabbix, resolve_backhaul_hostids(netbox))
 
     try:
-        zabbix.map.update(sysmapid=target_sysmapid, selements=selements, links=links)
+        # label_type_map=0: a drill-down site element shows its own label
+        # (the site name), not the name of the per-location map it links to.
+        zabbix.map.update(
+            sysmapid=target_sysmapid, selements=selements, links=links,
+            label_format=1, label_type_map=0,
+        )
     except pyzabbix.ZabbixAPIException as exc:
         err_msg = f"Zabbix returned the following error updating the map: {exc}."
         logger.error(err_msg)
