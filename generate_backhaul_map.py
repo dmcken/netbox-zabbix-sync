@@ -444,23 +444,65 @@ def resolve_link_metrics(zabbix, host_name, hostid=None) -> dict:
     # Throughput items must be fresh; capacity/speed items are often
     # polled far less often (ifHighSpeed hourly), so only the throughput
     # side's age is checked.
-    if any(time.time() - int(thr['lastclock']) > STALE_SECONDS for thr, _cap in pairs):
+    if any(time.time() - int(thr['lastclock']) > STALE_SECONDS for _dir, thr, _cap in pairs):
         logger.warning(f"Stale utilization data for backhaul host {host_name}.")
         return {'utilization_pct': None, 'label': "no data"}
 
-    throughput_bps = max(float(thr['lastvalue']) for thr, _cap in pairs)
-    pct = max(float(thr['lastvalue']) / float(cap['lastvalue']) * 100 for thr, cap in pairs)
+    directions = {
+        direction: (float(thr['lastvalue']), float(cap['lastvalue']))
+        for direction, thr, cap in pairs
+    }
+    pct = max(bps / cap * 100 for bps, cap in directions.values())
     if pct > MAX_PLAUSIBLE_UTILIZATION_PCT:
         # Throughput well beyond the link's own reported capacity is a
         # bad item (e.g. a raw counter stored without a per-second
         # conversion), not real load - don't paint it as a red hot link.
+        throughput_bps = max(bps for bps, _cap in directions.values())
         logger.warning(
             f"Implausible utilization {pct:.0f}% for backhaul host {host_name} "
             f"({throughput_bps / 1e6:.0f} Mbps); check its Zabbix template items."
         )
         return {'utilization_pct': None, 'label': "invalid data"}
-    label = f"{throughput_bps / 1e6:.0f} Mbps / {pct:.0f}%"
-    return {'utilization_pct': pct, 'label': label}
+    # 'tx'/'rx' are relative to this radio's own site: tx = traffic
+    # leaving that site over the link, rx = traffic arriving from the far
+    # end. build_links orients them onto the two map sites.
+    return {
+        'utilization_pct': pct,
+        'label': None,
+        'tx': directions.get('tx'),
+        'rx': directions.get('rx'),
+    }
+
+
+def _format_bps(bps: float) -> str:
+    """'620 Mbps', or '1.4 Gbps' from 1000 Mbps up."""
+    if bps >= 1e9:
+        return f"{bps / 1e9:.1f} Gbps"
+    return f"{bps / 1e6:.0f} Mbps"
+
+
+def _site_code(name: str) -> str:
+    """Short site name for link labels: 'Tower - SHP' -> 'SHP',
+    'DC - SY5' -> 'SY5'."""
+    return name.split(' - ', 1)[-1]
+
+
+def directional_label(graph, from_slug, to_slug, metrics) -> str:
+    """Two-line link label, one line per direction, each as
+    '<FROM>→<TO> <traffic> / <capacity>', e.g.
+        SHP→AUS 620 Mbps / 1.0 Gbps
+        AUS→SHP 45 Mbps / 1.0 Gbps
+    from_slug is the site whose radio the metrics were read from (its tx
+    is traffic from_slug -> to_slug). A direction the radio didn't report
+    is left out rather than shown as 0."""
+    a = _site_code(graph.nodes[from_slug]['name'])
+    b = _site_code(graph.nodes[to_slug]['name'])
+    lines = []
+    for direction, src, dst in (('tx', a, b), ('rx', b, a)):
+        if metrics.get(direction):
+            bps, cap = metrics[direction]
+            lines.append(f"{src}→{dst} {_format_bps(bps)} / {_format_bps(cap)}")
+    return "\n".join(lines) or "no data"
 
 
 _IF_ITEM_RE = re.compile(r'^net\.if\.(in|out|speed)\[[^\]]*?\.(\d+)\]$')
@@ -468,18 +510,22 @@ _RADIO_IF_HINTS = ('radio', 'air', 'wlan', 'ath', 'carrier')
 
 
 def _utilization_pairs(items: list) -> list:
-    """Picks [(throughput_item, capacity_item), ...] - one pair per
+    """Picks [(direction, throughput_item, capacity_item), ...] - one per
     traffic direction - for a backhaul radio's utilization, always
     taking a throughput and its capacity from the same interface/radio.
+    direction is 'tx' (leaving this radio's site over the link) or 'rx'
+    (arriving from the far end).
 
     Tried in order, first match wins:
       1. IF-MIB: the radio interface's (named Radio/air/wlan/ath/carrier)
-         in and out octets, each against that same ifIndex's speed.
+         in and out octets, each against that same ifIndex's speed
+         (air out = tx, air in = rx).
       2. RAy3: Ethernet data-port throughput in/out against the current
-         air net bitrate.
-      3. airFiber/LTU: downlink/uplink throughput against the matching
-         direction's capacity.
-      4. IF-MIB fallback: the busiest interface that has a non-zero speed.
+         air net bitrate (LAN in = sent over the air = tx).
+      3. airFiber/LTU: uplink/downlink throughput against the matching
+         direction's capacity (uplink = tx, downlink = rx).
+      4. IF-MIB fallback: the busiest interface that has a non-zero speed
+         - a wired port by elimination, so LAN in = tx as for RAy3.
 
     Previously the freshest throughput item and the freshest speed item
     were picked independently, which on multi-port radios (e.g. Aviat
@@ -504,35 +550,35 @@ def _utilization_pairs(items: list) -> list:
         if {'in', 'out', 'speed'} <= d.keys() and positive(d['speed'])
     }
 
-    def if_pairs(d):
-        return [(d['in'], d['speed']), (d['out'], d['speed'])]
+    def busiest(ifs):
+        return max(ifs, key=lambda d: float(d['in']['lastvalue']) + float(d['out']['lastvalue']))
 
     radio_ifs = [
         d for d in usable_ifs.values()
         if any(hint in d['in'].get('name', '').lower() for hint in _RADIO_IF_HINTS)
     ]
     if radio_ifs:
-        busiest = max(radio_ifs, key=lambda d: float(d['in']['lastvalue']) + float(d['out']['lastvalue']))
-        return if_pairs(busiest)
+        d = busiest(radio_ifs)
+        return [('tx', d['out'], d['speed']), ('rx', d['in'], d['speed'])]
 
     if positive(live.get('netBitrate')) and 'ethInThroughput' in live and 'ethOutThroughput' in live:
-        return [(live['ethInThroughput'], live['netBitrate']),
-                (live['ethOutThroughput'], live['netBitrate'])]
+        return [('tx', live['ethInThroughput'], live['netBitrate']),
+                ('rx', live['ethOutThroughput'], live['netBitrate'])]
 
     def by_prefix(prefix):
         return next((i for k, i in sorted(live.items()) if k.startswith(prefix)), None)
 
     af_pairs = [
-        (by_prefix(f'throughput.{direction}'), by_prefix(f'capacity.{direction}'))
-        for direction in ('downlink', 'uplink')
+        (direction, by_prefix(f'throughput.{af_name}'), by_prefix(f'capacity.{af_name}'))
+        for direction, af_name in (('tx', 'uplink'), ('rx', 'downlink'))
     ]
-    af_pairs = [(thr, cap) for thr, cap in af_pairs if thr is not None and positive(cap)]
+    af_pairs = [(d, thr, cap) for d, thr, cap in af_pairs if thr is not None and positive(cap)]
     if af_pairs:
         return af_pairs
 
     if usable_ifs:
-        busiest = max(usable_ifs.values(), key=lambda d: float(d['in']['lastvalue']) + float(d['out']['lastvalue']))
-        return if_pairs(busiest)
+        d = busiest(usable_ifs.values())
+        return [('tx', d['in'], d['speed']), ('rx', d['out'], d['speed'])]
     return []
 
 
@@ -1097,11 +1143,15 @@ def build_links(graph: nx.Graph, slug_to_id: dict, zabbix, hostids: dict) -> lis
             name = device_name if hostid else zabbix_host_name(device_name)
             return resolve_link_metrics(zabbix, name, hostid)
 
-        metrics = metrics_for(data['device_a'])
-        if metrics['utilization_pct'] is None:
-            # Radios at each end are separate Zabbix hosts; fall back to
-            # the far end before giving up on this link entirely.
-            metrics = metrics_for(data['device_b'])
+        # Radios at each end are separate Zabbix hosts; try this end's
+        # radio first, then the far end's before giving up on the link.
+        # Whichever answered sets the label's orientation (its tx is
+        # traffic from its own site to the other).
+        for from_slug, to_slug in ((site_a, site_b), (site_b, site_a)):
+            metrics = metrics_for(data['site_devices'][from_slug])
+            if metrics['utilization_pct'] is not None:
+                metrics['label'] = directional_label(graph, from_slug, to_slug, metrics)
+                break
 
         links.append({
             'selementid1': slug_to_id[site_a],
