@@ -32,7 +32,15 @@ import utils
 
 logger = logging.getLogger(__name__)
 
-TARGET_MAP_NAME = "WISP - Auto Backhaul"
+# One overview map per ASN, named "<MAP_NAME_PREFIX>AS<asn> <description>"
+# (the Netbox ASN object's description), or NO_ASN_MAP_NAME for sites
+# without one. Maps with this prefix that no longer match an ASN group
+# are deleted, so the prefix must stay unique to this script.
+MAP_NAME_PREFIX = "Auto Backhaul - "
+NO_ASN_MAP_NAME = MAP_NAME_PREFIX + "No ASN"
+# The single overview map's name before the per-ASN split; renamed (not
+# recreated) to the largest ASN group's name so its sysmapid survives.
+LEGACY_MAP_NAME = "WISP - Auto Backhaul"
 TARGET_WIDTH = 1700
 TARGET_HEIGHT = 900
 
@@ -1152,13 +1160,96 @@ def resolve_site_drilldown_maps(netbox, graph: nx.Graph, location_map_ids: dict)
     return site_map_ids
 
 
+def resolve_site_asns(netbox) -> dict:
+    """{site slug: the site's ASN number, or None}. A site with several
+    ASNs is grouped under the lowest, so it lands on exactly one map."""
+    return {
+        site.slug: min((asn.asn for asn in (site.asns or [])), default=None)
+        for site in netbox.dcim.sites.all()
+    }
+
+
+def resolve_asn_descriptions(netbox) -> dict:
+    """{ASN number: the Netbox ASN object's description}."""
+    return {asn.asn: (asn.description or '').strip() for asn in netbox.ipam.asns.all()}
+
+
+def asn_map_name(asn, descriptions: dict) -> str:
+    """'Auto Backhaul - AS140967 Steele Tech - WISP', or the no-ASN name."""
+    if asn is None:
+        return NO_ASN_MAP_NAME
+    description = descriptions.get(asn)
+    return f"{MAP_NAME_PREFIX}AS{asn} {description}" if description else f"{MAP_NAME_PREFIX}AS{asn}"
+
+
+def split_by_asn(graph: nx.Graph, site_asns: dict) -> dict:
+    """Splits the backhaul graph into one subgraph per ASN:
+    {asn: (subgraph, member_slugs)}.
+
+    Each subgraph holds that ASN's own sites plus, as boundary nodes,
+    any site from another ASN they link to directly (e.g. SY5 on the WISP
+    map via Swoop), carrying a 'boundary_asn' attribute so it can be
+    labelled and drill down into its own ASN's map. The Internet cloud
+    is included when any of those sites has an Internet circuit, along
+    with the boundary sites' own Internet links, so the map still shows
+    the path out. Links between two boundary sites belong on their own
+    ASN's map and are dropped here.
+    """
+    members_by_asn = {}
+    for node in graph.nodes():
+        if node != INTERNET_NODE:
+            members_by_asn.setdefault(site_asns.get(node), set()).add(node)
+
+    groups = {}
+    for asn, members in members_by_asn.items():
+        boundary = {
+            neighbour for member in members for neighbour in graph.neighbors(member)
+            if neighbour not in members and neighbour != INTERNET_NODE
+        }
+        nodes = members | boundary
+        if INTERNET_NODE in graph and any(graph.has_edge(n, INTERNET_NODE) for n in nodes):
+            nodes.add(INTERNET_NODE)
+        sub = graph.subgraph(nodes).copy()
+        sub.remove_edges_from([
+            (a, b) for a, b in list(sub.edges())
+            if a in boundary and b in boundary
+        ])
+        for node in boundary:
+            sub.nodes[node]['boundary_asn'] = site_asns.get(node)
+        groups[asn] = (sub, members)
+    return groups
+
+
+def migrate_legacy_map(zabbix, new_name: str) -> None:
+    """Renames the pre-split single overview map to new_name, once, so
+    the largest ASN group's map keeps the old map's sysmapid instead of a
+    fresh one being created next to it."""
+    if zabbix.map.get(filter={'name': new_name}, output=['sysmapid']):
+        return
+    legacy = zabbix.map.get(filter={'name': LEGACY_MAP_NAME}, output=['sysmapid'])
+    if legacy:
+        zabbix.map.update(sysmapid=legacy[0]['sysmapid'], name=new_name)
+        logger.info(f"Renamed map '{LEGACY_MAP_NAME}' to '{new_name}'.")
+
+
+def remove_stale_asn_maps(zabbix, current_names: set) -> None:
+    """Deletes this script's per-ASN overview maps (MAP_NAME_PREFIX) for
+    ASN groups that no longer exist, e.g. after a site's ASN changes."""
+    for existing in zabbix.map.get(search={'name': MAP_NAME_PREFIX}, startSearch=True,
+                                   output=['sysmapid', 'name']):
+        if existing['name'] not in current_names:
+            zabbix.map.delete(existing['sysmapid'])
+            logger.info(f"Deleted stale per-ASN map '{existing['name']}'.")
+
+
 def build_selements(positions: dict, graph: nx.Graph, site_map_ids: dict):
     """Builds the selements list plus a site-slug -> selementid lookup.
 
     A site with a per-site map (site_map_ids) becomes a 'Map' element
     (elementtype 1), so clicking it drills down into that site's own map.
     Everything else (the Internet cloud, or a site whose map couldn't be
-    built) stays a plain image, same as before.
+    built) stays a plain image, same as before. A boundary site from
+    another ASN (see split_by_asn) is labelled with its ASN.
     """
     selements = []
     slug_to_id = {}
@@ -1169,11 +1260,15 @@ def build_selements(positions: dict, graph: nx.Graph, site_map_ids: dict):
         else:
             elementtype = '4'
             elements = []
+        label = graph.nodes[slug]['name']
+        if 'boundary_asn' in graph.nodes[slug]:
+            asn = graph.nodes[slug]['boundary_asn']
+            label += f"\n(AS{asn})" if asn else "\n(no ASN)"
         selements.append({
             'selementid': str(idx),
             'elementtype': elementtype,
             'iconid_off': INTERNET_ICONID if slug == INTERNET_NODE else SITE_ICONID,
-            'label': graph.nodes[slug]['name'],
+            'label': label,
             'x': x,
             'y': y,
             'elements': elements,
@@ -1259,28 +1354,67 @@ def main():
     location_map_ids = build_location_maps(zabbix, netbox)
     site_map_ids = resolve_site_drilldown_maps(netbox, graph, location_map_ids)
 
-    positions, map_width, map_height = compute_layout(graph, TARGET_WIDTH, TARGET_HEIGHT)
-    target_sysmapid = get_or_create_map(zabbix, TARGET_MAP_NAME, map_width, map_height)
+    # One overview map per ASN (see split_by_asn). All maps are created
+    # before any is filled in, so boundary sites can link to the other
+    # ASN's map on the same run.
+    site_asns = resolve_site_asns(netbox)
+    groups = split_by_asn(graph, site_asns)
+    names = {asn: asn_map_name(asn, resolve_asn_descriptions(netbox)) for asn in groups}
+    largest = max(groups, key=lambda asn: (len(groups[asn][1]), str(asn)))
+    migrate_legacy_map(zabbix, names[largest])
 
-    selements, slug_to_id = build_selements(positions, graph, site_map_ids)
-    links = build_links(graph, slug_to_id, zabbix, netbox, resolve_backhaul_hostids(netbox))
+    layouts = {asn: compute_layout(sub, TARGET_WIDTH, TARGET_HEIGHT) for asn, (sub, _) in groups.items()}
+    map_ids = {
+        asn: get_or_create_map(zabbix, names[asn], layouts[asn][1], layouts[asn][2])
+        for asn in groups
+    }
+    hostids = resolve_backhaul_hostids(netbox)
 
-    try:
-        # label_type_map=0: a drill-down site element shows its own label
-        # (the site name), not the name of the per-location map it links to.
-        zabbix.map.update(
-            sysmapid=target_sysmapid, selements=selements, links=links,
-            label_format=1, label_type_map=0,
+    # Zabbix rejects maps that contain each other in a cycle, so a
+    # boundary site only drills into its own ASN's map when that map
+    # doesn't (directly or indirectly) already link back here. Largest
+    # map first, so it's the one that gets the cross-ASN links; any
+    # other boundary site falls back to its own location map, if any.
+    asn_links = {}
+
+    def reaches(src, dst, seen=()):
+        return src == dst or any(
+            nxt not in seen and reaches(nxt, dst, seen + (src,))
+            for nxt in asn_links.get(src, ())
         )
-    except pyzabbix.ZabbixAPIException as exc:
-        err_msg = f"Zabbix returned the following error updating the map: {exc}."
-        logger.error(err_msg)
-        raise exceptions.MapUpdateError(err_msg) from exc
 
-    logger.info(
-        f"Updated map '{TARGET_MAP_NAME}' with {len(selements)} sites "
-        f"and {len(links)} links."
-    )
+    for asn, (sub, members) in sorted(groups.items(), key=lambda kv: -len(kv[1][1])):
+        drilldowns = {slug: mapid for slug, mapid in site_map_ids.items() if slug in members}
+        for slug in sub.nodes():
+            if 'boundary_asn' not in sub.nodes[slug]:
+                continue
+            other = site_asns.get(slug)
+            if not reaches(other, asn):
+                drilldowns[slug] = map_ids[other]
+                asn_links.setdefault(asn, set()).add(other)
+            elif slug in site_map_ids:
+                drilldowns[slug] = site_map_ids[slug]
+        selements, slug_to_id = build_selements(layouts[asn][0], sub, drilldowns)
+        links = build_links(sub, slug_to_id, zabbix, netbox, hostids)
+
+        try:
+            # label_type_map=0: a drill-down site element shows its own label
+            # (the site name), not the name of the map it links to.
+            zabbix.map.update(
+                sysmapid=map_ids[asn], selements=selements, links=links,
+                label_format=1, label_type_map=0,
+            )
+        except pyzabbix.ZabbixAPIException as exc:
+            err_msg = f"Zabbix returned the following error updating '{names[asn]}': {exc}."
+            logger.error(err_msg)
+            raise exceptions.MapUpdateError(err_msg) from exc
+
+        logger.info(
+            f"Updated map '{names[asn]}' with {len(members)} sites "
+            f"({len(selements) - len(members)} boundary/Internet nodes) and {len(links)} links."
+        )
+
+    remove_stale_asn_maps(zabbix, set(names.values()))
 
 
 if __name__ == "__main__":
