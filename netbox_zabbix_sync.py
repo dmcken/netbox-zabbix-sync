@@ -490,7 +490,13 @@ class NetworkDevice:
                 break
         else:
             logger.warning(f"Device {self.name}: template OUT of sync.")
-            self.update_zabbix_host(templates=[{'templateid': self.template_id}])
+            # Clear (not just unlink) the templates being replaced: a plain
+            # unlink leaves their items and triggers behind on the host, still
+            # polling and alerting under the old template's rules.
+            replaced = [{'templateid': t['templateid']} for t in host["parentTemplates"]
+                        if t['templateid'] != self.template_id]
+            self.update_zabbix_host(templates=[{'templateid': self.template_id}],
+                                    templates_clear=replaced)
 
         # Sync the hostgroups
         n_host_group_ids = []
