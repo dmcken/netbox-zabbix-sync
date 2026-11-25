@@ -1224,6 +1224,102 @@ def sync_location_dependencies(zabbix):
         _ensure_site_down_trigger(zabbix, hub, location_code)
 
 
+CLUSTER_HOSTGROUP = "Clusters"
+# Set on each cluster host to the API address of one active node, for
+# cluster templates such as "Proxmox VE by HTTP".
+CLUSTER_API_HOST_MACRO = "{$PVE.URL.HOST}"
+
+
+def _cluster_api_ip(netbox, cluster):
+    """Primary IPv4 of the first active device (by name) in the cluster."""
+    devices = sorted(netbox.dcim.devices.filter(cluster_id=cluster.id), key=lambda d: d.name or '')
+    for dev in devices:
+        if dev.status.value == 'active' and dev.primary_ip4:
+            return str(dev.primary_ip4).split('/')[0]
+    return None
+
+
+def sync_clusters(netbox, zabbix, zabbix_groups_map, zabbix_templates):
+    """One Zabbix host per NetBox cluster whose zabbix_template custom field
+    is set (e.g. "AL - Proxmox VE by HTTP", which monitors a whole Proxmox
+    cluster through any node's API). The host has no interface; the sync
+    keeps its name, groups and template, and the CLUSTER_API_HOST_MACRO
+    host macro pointing at an active node. Other host macros (the API token
+    secret) are left alone. Clearing the template deletes the host.
+    """
+    templates_by_name = {t['name']: t['templateid'] for t in zabbix_templates}
+    for cluster in netbox.virtualization.clusters.all():
+        template_name = cluster.custom_fields.get(CF['TEMPLATE'])
+        hostid = cluster.custom_fields.get(CF['HOSTID'])
+        try:
+            if not template_name or _has_skip_tag(cluster):
+                if hostid:
+                    logger.info(f"Cluster {cluster.name}: no Zabbix template - deleting host {hostid}.")
+                    zabbix.host.delete(str(hostid))
+                    cluster.custom_fields[CF['HOSTID']] = None
+                    cluster.save()
+                continue
+            template_id = templates_by_name.get(template_name)
+            if not template_id:
+                logger.error(f"Cluster {cluster.name}: Zabbix template '{template_name}' not found.")
+                continue
+            host_name = f"Cluster {cluster.name}"
+            group_ids = []
+            for group_name in (CLUSTER_HOSTGROUP, f"Cluster - {cluster.name}"):
+                if group_name not in zabbix_groups_map:
+                    created = zabbix.hostgroup.create(name=group_name)
+                    zabbix_groups_map[group_name] = {'groupid': created['groupids'][0], 'name': group_name}
+                    logger.info(f"Created hostgroup '{group_name}'.")
+                group_ids.append({'groupid': zabbix_groups_map[group_name]['groupid']})
+            api_ip = _cluster_api_ip(netbox, cluster)
+            if not api_ip:
+                logger.warning(f"Cluster {cluster.name}: no active device with a primary IP for the API host.")
+
+            host = zabbix.host.get(hostids=[str(hostid)], output=['host'], selectParentTemplates=['templateid'],
+                                   selectHostGroups=['groupid']) if hostid else []
+            if not host:
+                existing = zabbix.host.get(filter={'host': host_name}, output=['hostid'])
+                if existing:
+                    hostid = existing[0]['hostid']
+                    host = zabbix.host.get(hostids=[hostid], output=['host'], selectParentTemplates=['templateid'],
+                                           selectHostGroups=['groupid'])
+            if not host:
+                created = zabbix.host.create(host=host_name, groups=group_ids, templates=[{'templateid': template_id}],
+                                             description=f"NetBox cluster {cluster.name} (netbox-zabbix-sync)")
+                hostid = created['hostids'][0]
+                logger.info(f"Created cluster host {host_name} in Zabbix.")
+            else:
+                host = host[0]
+                changes = {}
+                if host['host'] != host_name:
+                    changes['host'] = host_name
+                if sorted(int(g['groupid']) for g in host['hostgroups']) != sorted(int(g['groupid']) for g in group_ids):
+                    changes['groups'] = group_ids
+                current = [t['templateid'] for t in host['parentTemplates']]
+                if current != [template_id]:
+                    changes['templates'] = [{'templateid': template_id}]
+                    changes['templates_clear'] = [{'templateid': t} for t in current if t != template_id]
+                if changes:
+                    zabbix.host.update(hostid=hostid, **changes)
+                    logger.info(f"Updated cluster host {host_name}: {sorted(changes)}")
+            if str(cluster.custom_fields.get(CF['HOSTID'])) != str(hostid):
+                cluster.custom_fields[CF['HOSTID']] = int(hostid)
+                cluster.save()
+
+            if api_ip:
+                macro = zabbix.usermacro.get(hostids=[str(hostid)], filter={'macro': CLUSTER_API_HOST_MACRO},
+                                             output=['hostmacroid', 'value'])
+                if not macro:
+                    zabbix.usermacro.create(hostid=str(hostid), macro=CLUSTER_API_HOST_MACRO, value=api_ip,
+                                            description='API node, set by netbox-zabbix-sync')
+                    logger.info(f"Cluster {cluster.name}: API host -> {api_ip}")
+                elif macro[0]['value'] != api_ip:
+                    zabbix.usermacro.update(hostmacroid=macro[0]['hostmacroid'], value=api_ip)
+                    logger.info(f"Cluster {cluster.name}: API host {macro[0]['value']} -> {api_ip}")
+        except (pyzabbix.ZabbixAPIException, pynetbox.RequestError) as exc:
+            logger.error(f"Skipping cluster {cluster.name}: {exc}")
+
+
 WEBSITE_TAG = "netbox_service"
 WEBSITE_SLOW_SECONDS = 5
 WEBSITE_CERT_WARN_DAYS = 14
@@ -1430,6 +1526,8 @@ def main():
 
     sync_virtual_machines(netbox, zabbix, arguments, site_gps_map,
                           zabbix_groups_map, zabbix_templates, zabbix_proxies)
+
+    sync_clusters(netbox, zabbix, zabbix_groups_map, zabbix_templates)
 
     try:
         sync_websites(netbox, zabbix)
