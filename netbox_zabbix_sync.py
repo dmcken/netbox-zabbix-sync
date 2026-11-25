@@ -792,7 +792,8 @@ class VirtualMachineHost(NetworkDevice):
         self.ip = self.cidr.split("/")[0]
 
         platform_id = utils.rgetattr(self.nb, 'platform.id', None)
-        self.template_name = self.platform_templates.get(platform_id)
+        self.template_name = (vm_context_template(self.nb)
+                              or self.platform_templates.get(platform_id))
 
         self.zabbix_id = self.nb.custom_fields.get(CF['HOSTID'])
 
@@ -810,7 +811,16 @@ class VirtualMachineHost(NetworkDevice):
         return False
 
     def _template_source(self) -> str:
+        if vm_context_template(self.nb):
+            return f"VM '{self.name}' config context"
         return f"Platform '{utils.rgetattr(self.nb, 'platform.name', None)}'"
+
+
+def vm_context_template(nb_vm) -> str | None:
+    """A VM's own Zabbix template from its config context ("zabbix":
+    {"template": "..."}), overriding its platform's - e.g. "AL Ping" for a
+    VM that runs no Zabbix agent."""
+    return ((getattr(nb_vm, 'config_context', None) or {}).get('zabbix') or {}).get('template')
 
 
 def _has_skip_tag(nb_object) -> bool:
@@ -885,14 +895,12 @@ def sync_virtual_machines(netbox, zabbix, arguments, site_gps_map,
         for platform in netbox.dcim.platforms.all()
         if platform.custom_fields.get(CF['TEMPLATE'])
     }
-    if not platform_templates:
-        logger.debug("No platform has a Zabbix template; skipping VMs.")
-        return
 
     for nb_vm in netbox.virtualization.virtual_machines.all():
         try:
-            if utils.rgetattr(nb_vm, 'platform.id', None) not in platform_templates:
-                logger.debug(f"Skipping VM {nb_vm.name}: platform has no Zabbix template.")
+            if (utils.rgetattr(nb_vm, 'platform.id', None) not in platform_templates
+                    and not vm_context_template(nb_vm)):
+                logger.debug(f"Skipping VM {nb_vm.name}: no Zabbix template (platform or context).")
                 continue
             if _has_skip_tag(nb_vm):
                 logger.debug(f"Skipping VM {nb_vm.name}: tagged {SKIP_TAG_SLUG}.")
@@ -1210,6 +1218,149 @@ def sync_location_dependencies(zabbix):
         _ensure_site_down_trigger(zabbix, hub, location_code)
 
 
+WEBSITE_TAG = "netbox_service"
+WEBSITE_SLOW_SECONDS = 5
+WEBSITE_CERT_WARN_DAYS = 14
+WEBSITE_CERT_HIGH_DAYS = 3
+
+
+def _website_parent(netbox, service):
+    """The device/VM a NetBox service belongs to, or None."""
+    kind = getattr(service, 'parent_object_type', None)
+    pid = getattr(service, 'parent_object_id', None)
+    if kind == 'dcim.device':
+        return netbox.dcim.devices.get(pid)
+    if kind == 'virtualization.virtualmachine':
+        return netbox.virtualization.virtual_machines.get(pid)
+    return None
+
+
+def _website_desired(service, host_name):
+    """What Zabbix should hold for one monitored service."""
+    url = service.custom_fields['monitor_url']
+    # Web scenario item keys use the name unquoted (web.test.fail[Website x]),
+    # so keep it free of the characters that would end a key parameter.
+    scenario = "Website " + "".join(c for c in service.name if c not in ',[]"')
+    q = scenario
+    hostname = (url.split('://', 1)[-1].split('/', 1)[0].split(':', 1)[0])
+    port = '443' if url.startswith('https://') else '80'
+    tags = [{'tag': WEBSITE_TAG, 'value': str(service.id)},
+            {'tag': 'managed_by', 'value': 'netbox-zabbix-sync'}]
+    cert_key = f'ssl_cert_expiry["{hostname}","{port}"]'
+    triggers = [
+        {'description': f'Website {service.name} is down',
+         'expression': f'min(/{host_name}/web.test.fail[{q}],#3)>0',
+         'priority': 4,
+         'comments': f'{url} failed 3 checks in a row (see web.test.error).'},
+        {'description': f'Website {service.name} is slow (>{WEBSITE_SLOW_SECONDS}s)',
+         'expression': f'avg(/{host_name}/web.test.time[{q},GET,resp],10m)>{WEBSITE_SLOW_SECONDS}',
+         'priority': 2, 'comments': f'10-minute average response time of {url}.'},
+    ]
+    if port == '443':
+        triggers += [
+            {'description': f'Website {service.name}: TLS certificate expires in under {WEBSITE_CERT_WARN_DAYS} days',
+             'expression': f'last(/{host_name}/{cert_key})<{WEBSITE_CERT_WARN_DAYS}', 'priority': 2,
+             'comments': 'A Let\'s Encrypt renewal has probably failed.'},
+            {'description': f'Website {service.name}: TLS certificate expires in under {WEBSITE_CERT_HIGH_DAYS} days',
+             'expression': f'last(/{host_name}/{cert_key})<{WEBSITE_CERT_HIGH_DAYS}', 'priority': 4,
+             'comments': 'Renew now - browsers will refuse the site when it expires.'},
+            {'description': f'Website {service.name}: cannot read TLS certificate',
+             'expression': f'nodata(/{host_name}/{cert_key},3h)=1', 'priority': 3,
+             'comments': 'ssl_cert_expiry external check has returned nothing for 3 h.'},
+        ]
+    return {
+        'scenario': scenario, 'url': url, 'tags': tags,
+        'cert': {'key': cert_key, 'name': f'Website {service.name}: TLS certificate days left'} if port == '443' else None,
+        'triggers': triggers,
+    }
+
+
+def sync_websites(netbox, zabbix):
+    """Monitor NetBox services that have a Monitor URL (custom field
+    monitor_url): on the Zabbix host of the service's device/VM, keep a web
+    scenario (page loads, following redirects, status 200), down/slow
+    triggers and - for https - a TLS expiry check via the ssl_cert_expiry
+    external script on the Zabbix server. Everything is tagged
+    netbox_service=<id>; tagged objects whose service is gone are removed.
+    """
+    wanted = {}   # service id -> (hostid, host technical name, desired)
+    for service in netbox.ipam.services.all():
+        if not (service.custom_fields or {}).get('monitor_url'):
+            continue
+        parent = _website_parent(netbox, service)
+        hostid = parent.custom_fields.get(CF['HOSTID']) if parent else None
+        if not hostid:
+            logger.warning(f"Website {service.name}: its host has no Zabbix host yet; skipping.")
+            continue
+        hosts = zabbix.host.get(hostids=[hostid], output=['host'], selectInterfaces=['interfaceid', 'main'])
+        if not hosts:
+            logger.warning(f"Website {service.name}: Zabbix host {hostid} not found; skipping.")
+            continue
+        wanted[str(service.id)] = (str(hostid), hosts[0], _website_desired(service, hosts[0]['host']))
+
+    # Existing managed objects, by service id.
+    tag_filter = [{'tag': WEBSITE_TAG, 'operator': 4}]  # tag exists
+    have_tests = zabbix.httptest.get(output=['httptestid', 'name', 'hostid'], selectSteps='extend',
+                                     selectTags='extend', tags=tag_filter)
+    have_items = zabbix.item.get(output=['itemid', 'key_', 'hostid', 'name'], selectTags='extend', tags=tag_filter)
+    have_trigs = zabbix.trigger.get(output=['triggerid', 'description', 'expression', 'priority'],
+                                    selectTags='extend', selectHosts=['hostid'], tags=tag_filter, expandExpression=True)
+    def sid(obj):
+        return next((t['value'] for t in obj.get('tags', []) if t['tag'] == WEBSITE_TAG), None)
+
+    # Remove anything whose service is no longer monitored (or moved host).
+    for trig in have_trigs:
+        w = wanted.get(sid(trig))
+        if w is None or all(h['hostid'] != w[0] for h in trig['hosts']):
+            logger.info(f"Website: deleting trigger '{trig['description']}'")
+            zabbix.trigger.delete(trig['triggerid'])
+    for test in have_tests:
+        w = wanted.get(sid(test))
+        if w is None or test['hostid'] != w[0]:
+            logger.info(f"Website: deleting web scenario '{test['name']}'")
+            zabbix.httptest.delete(test['httptestid'])
+    for item in have_items:
+        w = wanted.get(sid(item))
+        if w is None or item['hostid'] != w[0] or not w[2]['cert'] or item['key_'] != w[2]['cert']['key']:
+            logger.info(f"Website: deleting item '{item['name']}'")
+            zabbix.item.delete(item['itemid'])
+
+    for service_id, (hostid, host, want) in wanted.items():
+        step = {'name': 'GET', 'no': 1, 'url': want['url'], 'follow_redirects': 1,
+                'status_codes': '200', 'timeout': '15s'}
+        test = next((t for t in have_tests if sid(t) == service_id and t['hostid'] == hostid), None)
+        if test is None:
+            logger.info(f"Website: creating web scenario '{want['scenario']}' on {host['host']}")
+            zabbix.httptest.create(name=want['scenario'], hostid=hostid, delay='1m', retries=2,
+                                   agent='Zabbix', steps=[step], tags=want['tags'])
+        else:
+            cur = test['steps'][0] if test['steps'] else {}
+            if test['name'] != want['scenario'] or cur.get('url') != want['url']:
+                logger.info(f"Website: updating web scenario '{want['scenario']}'")
+                zabbix.httptest.update(httptestid=test['httptestid'], name=want['scenario'], steps=[step])
+
+        if want['cert'] and not any(sid(i) == service_id and i['hostid'] == hostid for i in have_items):
+            main_if = next((i['interfaceid'] for i in host['interfaces'] if i['main'] == '1'), None)
+            logger.info(f"Website: creating TLS expiry item for {want['scenario']}")
+            zabbix.item.create(hostid=hostid, name=want['cert']['name'], key_=want['cert']['key'], type=10,
+                               value_type=0, units='days', delay='1h', history='90d',
+                               interfaceid=main_if, tags=want['tags'])
+
+        mine = [t for t in have_trigs if sid(t) == service_id and any(h['hostid'] == hostid for h in t['hosts'])]
+        for trig in want['triggers']:
+            cur = next((t for t in mine if t['description'] == trig['description']), None)
+            if cur is None:
+                logger.info(f"Website: creating trigger '{trig['description']}'")
+                zabbix.trigger.create(**trig, tags=want['tags'])
+            elif cur['expression'] != trig['expression'] or int(cur['priority']) != trig['priority']:
+                logger.info(f"Website: updating trigger '{trig['description']}'")
+                zabbix.trigger.update(triggerid=cur['triggerid'], expression=trig['expression'],
+                                      priority=trig['priority'])
+        for cur in mine:
+            if cur['description'] not in {t['description'] for t in want['triggers']}:
+                zabbix.trigger.delete(cur['triggerid'])
+
+
 def main():
     """Run the sync process.
     """
@@ -1273,6 +1424,12 @@ def main():
 
     sync_virtual_machines(netbox, zabbix, arguments, site_gps_map,
                           zabbix_groups_map, zabbix_templates, zabbix_proxies)
+
+    try:
+        sync_websites(netbox, zabbix)
+    except (pyzabbix.ZabbixAPIException, pynetbox.RequestError) as exc:
+        logger.error(f"Failed to sync website checks: {exc}")
+        logger.error(traceback.format_exc())
 
     try:
         sync_external_links_dashboard(
