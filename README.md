@@ -67,6 +67,11 @@ set the `zabbix_template` custom field on the platform (e.g. Ubuntu ->
 "Linux by Zabbix agent"). Platforms without one are ignored, so adding the
 field to a platform is what brings its VMs into Zabbix.
 
+* `zabbix_template` (on a platform or a device type) may list several
+  templates, comma-separated, e.g.
+  "Linux by Zabbix agent, Docker by Zabbix agent 2". New hosts get all of
+  them, and existing hosts are kept to exactly that list (templates not
+  listed are cleared, as when a single template changes).
 * The Zabbix host is monitored through the Zabbix agent (passive, port
   10050) on the VM's primary IPv4 address (falling back to its primary IP).
   A "zabbix" config context with `interface_type`/`interface_port`

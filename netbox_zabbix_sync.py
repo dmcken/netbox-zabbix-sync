@@ -103,6 +103,7 @@ class NetworkDevice:
         self.tenant = nb_device.tenant
         self.snmp_version = "2c" # Can be overridden by custom field.
         self.template_id = None
+        self.template_ids = []        # all templates, in zabbix_template order
         self.hostgroups = []
         self.zbxproxy = "0"
         self.zabbix_state = 0
@@ -288,21 +289,22 @@ class NetworkDevice:
             )
             logger.error(e)
             raise exceptions.SyncInventoryError()
-        for template in templates:
-            if template['name'] == self.template_name:
-                self.template_id = template['templateid']
-                e = (
-                    f"Found template ID {str(template['templateid'])} for "
-                    f"host {self.name}.")
-                logger.debug(e)
-                return True
-        # No match was found.
-        err_msg = (
-            f"Unable to find template {self.template_name} "
-            f"for host {self.name} in Zabbix."
-        )
-        logger.warning(err_msg)
-        raise exceptions.SyncInventoryError(err_msg)
+        # zabbix_template may name several templates, comma-separated
+        # (e.g. "Linux by Zabbix agent, Docker by Zabbix agent 2").
+        wanted = [n.strip() for n in str(self.template_name).split(',') if n.strip()]
+        by_name = {t['name']: t['templateid'] for t in templates}
+        missing = [n for n in wanted if n not in by_name]
+        if missing:
+            err_msg = (
+                f"Unable to find template(s) {', '.join(missing)} "
+                f"for host {self.name} in Zabbix."
+            )
+            logger.warning(err_msg)
+            raise exceptions.SyncInventoryError(err_msg)
+        self.template_ids = [by_name[n] for n in wanted]
+        self.template_id = self.template_ids[0]
+        logger.debug(f"Found template ID(s) {self.template_ids} for host {self.name}.")
+        return True
 
     def _template_source(self) -> str:
         """Describes where the Zabbix template comes from, for messages."""
@@ -387,7 +389,7 @@ class NetworkDevice:
 
             # Set interface, group and template configuration
             interfaces = self.set_interface_details()
-            templates = [{"templateid": self.template_id}]
+            templates = [{"templateid": t} for t in self.template_ids]
 
             # Set Zabbix proxy if defined
             self.set_proxy(proxys)
@@ -484,18 +486,16 @@ class NetworkDevice:
             )
             self.update_zabbix_host(host=self.name)
 
-        for template in host["parentTemplates"]:
-            if template["templateid"] == self.template_id:
-                logger.debug(f"Device {self.name}: template in-sync.")
-                break
+        linked = [t["templateid"] for t in host["parentTemplates"]]
+        if sorted(linked) == sorted(self.template_ids):
+            logger.debug(f"Device {self.name}: template in-sync.")
         else:
             logger.warning(f"Device {self.name}: template OUT of sync.")
             # Clear (not just unlink) the templates being replaced: a plain
             # unlink leaves their items and triggers behind on the host, still
             # polling and alerting under the old template's rules.
-            replaced = [{'templateid': t['templateid']} for t in host["parentTemplates"]
-                        if t['templateid'] != self.template_id]
-            self.update_zabbix_host(templates=[{'templateid': self.template_id}],
+            replaced = [{'templateid': t} for t in linked if t not in self.template_ids]
+            self.update_zabbix_host(templates=[{'templateid': t} for t in self.template_ids],
                                     templates_clear=replaced)
 
         # Sync the hostgroups
