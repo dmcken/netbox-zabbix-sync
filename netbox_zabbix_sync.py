@@ -62,6 +62,36 @@ logger = logging.getLogger(__name__)
 
 # Main code starts here.
 
+
+# Writable host interface fields, sent in full by merged_interface().
+INTERFACE_FIELDS = ("interfaceid", "type", "main", "useip", "ip", "dns", "port")
+
+
+def merged_interface(current, updates):
+    """Return the complete host interface with updates applied.
+
+    host.update(interfaces=[...]) replaces every interface on the host, so
+    it needs the whole interface, not just the changed fields that
+    hostinterface.update (removed in Zabbix 8.0) accepted.
+
+    current: the interface as returned by host.get(selectInterfaces=...).
+    updates: changed fields from consistency_check(). Its "details" dict is
+        partial, unless the SNMP version changed, in which case it holds the
+        complete new SNMP configuration.
+    """
+    iface = {k: current[k] for k in INTERFACE_FIELDS if k in current}
+    iface.update({k: v for k, v in updates.items() if k != "details"})
+    if str(iface.get("type")) == "2":  # SNMP: details are required
+        new = updates.get("details", {})
+        if "version" in new:
+            details = dict(new)
+        else:
+            details = dict(current.get("details") or {})
+            details.update(new)
+        iface["details"] = details
+    return iface
+
+
 class NetworkDevice:
     """Class representing a Network device.
     INPUT: (
@@ -450,7 +480,10 @@ class NetworkDevice:
             },
             selectInterfaces=[
                 'type',
+                'main',
+                'useip',
                 'ip',
+                'dns',
                 'port',
                 'details',
                 'interfaceid',
@@ -602,11 +635,13 @@ class NetworkDevice:
                          f"{str(updates['type'])} is not supported.")
                     logger.error(e)
                     raise exceptions.InterfaceConfigError(e)
-                # Set interfaceID for Zabbix config
-                updates["interfaceid"] = host["interfaces"][0]['interfaceid']
+                interface = merged_interface(host["interfaces"][0], updates)
                 try:
-                    # API call to Zabbix
-                    self.zabbix.hostinterface.update(updates)
+                    # hostinterface.update was removed in Zabbix 8.0. host.update
+                    # replaces the host's whole interface list, so send the
+                    # complete interface, keeping its interfaceid so Zabbix
+                    # updates it in place and its items stay bound to it.
+                    self.zabbix.host.update(hostid=host["hostid"], interfaces=[interface])
                     e = f"Solved {self.name} interface conflict."
                     logger.info(e)
                     self.create_journal_entry("info", e)
